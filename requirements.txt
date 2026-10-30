@@ -1,0 +1,2 @@
+# Pinned to the version tested locally in ~/workspace/fbvenv (Playwright 1.64.1).
+playwright==1.64.1

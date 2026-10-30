@@ -1,0 +1,21 @@
+# Render deployment for Cloud Browser v1 (Docker web service, free plan).
+# Repo layout assumed: the contents of ~/workspace/cloud-browser/ are at the
+# repo root, so ./Dockerfile exists at the root. See DEPLOY.md.
+services:
+  - type: web
+    name: cloud-browser
+    env: docker
+    dockerfilePath: ./Dockerfile
+    plan: free
+    healthCheckPath: /
+    envVars:
+      - key: PYTHONUNBUFFERED
+        value: "1"
+      # Token auth: Render generates a random token at deploy time (never
+      # hardcoded). Read it back in the Render dashboard (Environment) and
+      # give it to Muse with the public URL. Rotating it = change the value
+      # and redeploy; the server refuses to start without it.
+      - key: CLOUD_BROWSER_TOKEN
+        generateValue: true
+    # Render injects PORT automatically; server.py reads it (fallback:
+    # CLOUD_BROWSER_PORT).

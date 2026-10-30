@@ -1,0 +1,48 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Cloud Browser Test Page</title>
+<style>
+  body { font-family: system-ui, sans-serif; max-width: 800px; margin: 40px auto; padding: 0 20px; }
+  h1 { color: #1a5fb4; }
+  #status { margin-top: 16px; padding: 12px; background: #eef6ff; border: 1px solid #9cc; min-height: 20px; }
+  #more { margin-top: 600px; padding: 20px; background: #fff3cd; border: 1px solid #cc9; }
+  input { padding: 8px; font-size: 16px; width: 300px; }
+  button { padding: 8px 16px; font-size: 16px; cursor: pointer; }
+  .spacer { height: 500px; background: linear-gradient(#fff, #ddd); margin-top: 30px; }
+  #hover-box { margin-top: 20px; padding: 20px; background: #ddeeff; border: 1px solid #66c; width: 300px; }
+  #ctx-box { margin-top: 20px; padding: 20px; background: #ffeedd; border: 1px solid #c96; width: 300px; }
+  #dbl-box { margin-top: 20px; padding: 20px; background: #eeddff; border: 1px solid #96c; width: 300px; }
+  .mini-status { margin-top: 6px; padding: 6px; background: #f5f5f5; border: 1px solid #ccc; min-height: 18px; }
+</style>
+</head>
+<body>
+<h1>Cloud Browser Test Page</h1>
+<p>This is a LOCAL test page. If you can see this inside the cloud browser, the disposable session works.</p>
+
+<label for="name">Your name:</label>
+<input id="name" type="text" placeholder="Type your name here">
+<br><br>
+<button id="hello-btn" onclick="document.getElementById('status').textContent = 'Button clicked! Hello from the cloud browser.';">Click me</button>
+<p><a id="more-link" href="#more">Jump to the section below (scroll test)</a></p>
+<p><a id="page2-link" href="/test-page2.html">Go to Test Page 2 (Back/Forward test)</a></p>
+<div id="status">Not clicked yet.</div>
+
+<div id="hover-box" onmouseover="document.getElementById('hover-status').textContent = 'Hovered!';">Hover over this box</div>
+<div id="hover-status" class="mini-status">Not hovered yet.</div>
+
+<div id="ctx-box" oncontextmenu="document.getElementById('ctx-status').textContent = 'Right-clicked!'; return false;">Right-click this box</div>
+<div id="ctx-status" class="mini-status">Not right-clicked yet.</div>
+
+<div id="dbl-box" ondblclick="document.getElementById('dbl-status').textContent = 'Double-clicked!';">Double-click this box</div>
+<div id="dbl-status" class="mini-status">Not double-clicked yet.</div>
+
+<div class="spacer"><p>Scroll area — keep scrolling down to reach the yellow box.</p></div>
+
+<div id="more">
+  <h2>You scrolled here</h2>
+  <p>This yellow box is only visible after scrolling down. If the screenshot shows it, scroll forwarding works.</p>
+</div>
+</body>
+</html>

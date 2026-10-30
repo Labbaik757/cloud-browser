@@ -1,0 +1,20 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Cloud Browser Test Page 2</title>
+<style>
+  body { font-family: system-ui, sans-serif; max-width: 800px; margin: 40px auto; padding: 0 20px; }
+  h1 { color: #0a7a2a; }
+  #page2-status { margin-top: 16px; padding: 12px; background: #eaffea; border: 1px solid #8c8; min-height: 20px; }
+  button { padding: 8px 16px; font-size: 16px; cursor: pointer; }
+</style>
+</head>
+<body>
+<h1>Cloud Browser Test Page 2</h1>
+<p>This is the SECOND local test page. If you can see this, navigate-in-session worked.</p>
+<p><a id="back-link" href="/test-page.html">Back to Test Page 1</a></p>
+<button id="page2-btn" onclick="document.getElementById('page2-status').textContent = 'Page 2 button clicked!';">Click me on Page 2</button>
+<div id="page2-status">Page 2 — not clicked yet.</div>
+</body>
+</html>

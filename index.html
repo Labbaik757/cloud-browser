@@ -1,0 +1,213 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Cloud Browser v2 — full control</title>
+<style>
+  body { font-family: system-ui, sans-serif; background:#111; color:#eee; margin:0; padding:16px; }
+  h1 { font-size:20px; margin:0 0 4px; }
+  p.sub { color:#aaa; margin:0 0 12px; font-size:13px; }
+  .bar { display:flex; gap:8px; flex-wrap:wrap; margin-bottom:10px; }
+  input[type=text], input[type=url] { flex:1; min-width:280px; padding:8px; font-size:14px;
+    background:#222; color:#eee; border:1px solid #444; border-radius:6px; }
+  button { padding:8px 14px; font-size:14px; border-radius:6px; border:1px solid #444;
+    background:#2a7a2a; color:#fff; cursor:pointer; }
+  button.nav { background:#2a4a7a; }
+  button.stop { background:#8a2a2a; }
+  button:disabled { opacity:.5; cursor:default; }
+  #meta { font-size:14px; margin-bottom:8px; }
+  #elapsed { font-weight:700; font-size:18px; color:#7fd07f; }
+  #live { display:block; width:100%; max-width:1280px; border:2px solid #444; border-radius:8px;
+    background:#000; cursor:crosshair; min-height:200px; outline:none; }
+  #live:focus { border-color:#7fd07f; }
+  .hint { color:#aaa; font-size:12px; margin-top:6px; }
+</style>
+</head>
+<body>
+<h1>Cloud Browser v2 — full control</h1>
+<p class="sub">Disposable Playwright Chromium in the cloud (this machine). Unlimited time — no limit at all, session ends only when you click Stop. No persistence, no sign-up. Click the live view to focus it, then type directly into it, right-click, double-click, hover — everything goes to the remote browser.</p>
+
+<div class="bar">
+  <input id="token" type="password" placeholder="Token (printed when the server starts / in token.txt)">
+  <button id="unlock">Unlock</button>
+  <span id="token-state">locked — enter the token to use the browser</span>
+</div>
+
+<div class="bar">
+  <button id="back" class="nav" disabled>&larr; Back</button>
+  <button id="forward" class="nav" disabled>Forward &rarr;</button>
+  <button id="reload" class="nav" disabled>Reload</button>
+  <input id="url" type="url" value="">
+  <button id="go">Go</button>
+  <button id="start">Start Session</button>
+  <button id="stop" class="stop" disabled>Stop</button>
+</div>
+<div class="bar">
+  <input id="type-text" type="text" placeholder="Backup type box (click the remote input first, then type here)">
+  <button id="type-btn">Type</button>
+  <button id="enter-btn">Press Enter</button>
+</div>
+<div id="meta">Status: <span id="status-line">idle — no session</span> &nbsp;|&nbsp; Session time: <span id="elapsed">--</span> (unlimited)</div>
+<img id="live" tabindex="0" alt="Live view — start a session to see the remote browser">
+<p class="hint">Full control: click the live view, then type on your keyboard — letters, Backspace, Delete, Tab, arrows, Escape, Ctrl+A/C/V/X all go to the remote browser. Right-click and double-click work on the view; hover works too. Go navigates the SAME session (no restart). Screenshot refreshes every 500 ms while a session is live. Default page is the local test page (this VM has no internet path in Chromium, so live sites are unproven here). No time limit — session ends only on Stop.</p>
+
+<script>
+const $ = id => document.getElementById(id);
+const urlInput = $('url'), live = $('live');
+urlInput.value = location.origin + '/test-page.html';
+let sid = null, pollTimer = null;
+let token = ""; // memory only — never localStorage, never in the URL
+let lastHover = 0, lastHoverXY = [0, 0];
+
+async function api(path, body) {
+  const headers = {'Content-Type': 'application/json'};
+  if (token) headers['X-Cloud-Token'] = token;
+  const r = await fetch(path, {method: body ? 'POST' : 'GET',
+    headers, body: body ? JSON.stringify(body) : undefined});
+  if (r.status === 401) {
+    $('status-line').textContent = 'unauthorized — wrong or missing token';
+    return {error: 'unauthorized', http: 401};
+  }
+  const t = await r.text();
+  try { return JSON.parse(t); } catch { return {error: t, http: r.status}; }
+}
+
+$('unlock').onclick = async () => {
+  token = $('token').value.trim();
+  if (!token) { $('token-state').textContent = 'enter a token first'; return; }
+  const s = await api('/api/status');
+  if (s.error === 'unauthorized') {
+    $('token-state').textContent = 'wrong token — try again';
+    token = '';
+    return;
+  }
+  $('token-state').textContent = 'unlocked';
+  $('token').disabled = true; $('unlock').disabled = true;
+};
+
+async function refreshShot() {
+  if (!sid) return;
+  try {
+    const headers = {};
+    if (token) headers['X-Cloud-Token'] = token;
+    const r = await fetch('/api/screenshot?sid=' + sid + '&t=' + Date.now(), {headers});
+    if (!r.ok) { await endSession('session ended'); return; }
+    live.src = URL.createObjectURL(await r.blob());
+    const s = await api('/api/status');
+    if (s.active) {
+      $('elapsed').textContent = s.elapsed + 's';
+      $('status-line').textContent = 'LIVE — ' + (s.title || s.url || '');
+      // Keep the URL bar in sync with the remote page (unless typing in it).
+      if (document.activeElement !== urlInput && s.url && urlInput.value !== s.url) {
+        urlInput.value = s.url;
+      }
+    } else { await endSession('session ended'); }
+  } catch (e) { /* transient poll error — keep trying until status says dead */ }
+}
+
+function setNavEnabled(on) {
+  $('back').disabled = !on; $('forward').disabled = !on; $('reload').disabled = !on;
+}
+
+function endSession(msg) {
+  sid = null;
+  clearInterval(pollTimer); pollTimer = null;
+  $('start').disabled = false; $('start').textContent = 'Start Session';
+  $('stop').disabled = true; setNavEnabled(false);
+  $('elapsed').textContent = '--';
+  $('status-line').textContent = msg || 'idle — no session';
+}
+
+// Go / Start: if a session is live, navigate THAT session (same sid);
+// otherwise create a fresh session.
+async function goOrStart() {
+  const url = urlInput.value.trim();
+  if (!url) return;
+  if (sid) {
+    $('status-line').textContent = 'navigating…';
+    const res = await api('/api/navigate', {url});
+    if (res.error) { $('status-line').textContent = 'error: ' + res.error; }
+    return;
+  }
+  $('start').disabled = true;
+  $('status-line').textContent = 'starting…';
+  const res = await api('/api/start', {url});
+  if (res.error) { $('status-line').textContent = 'error: ' + res.error; $('start').disabled = false; return; }
+  sid = res.sid;
+  $('stop').disabled = false; setNavEnabled(true);
+  $('start').textContent = 'Go';
+  $('elapsed').textContent = '0s';
+  pollTimer = setInterval(refreshShot, 500);
+  refreshShot();
+  live.focus();
+}
+$('go').onclick = goOrStart;
+$('start').onclick = goOrStart;
+$('stop').onclick = async () => { await api('/api/stop', {}); endSession('stopped by you'); };
+$('back').onclick = async () => { if (sid) await api('/api/back', {}); };
+$('forward').onclick = async () => { if (sid) await api('/api/forward', {}); };
+$('reload').onclick = async () => { if (sid) await api('/api/reload', {}); };
+$('type-btn').onclick = async () => {
+  if (!sid) return;
+  await api('/api/type', {text: $('type-text').value});
+  $('type-text').value = '';
+};
+$('type-text').addEventListener('keydown', async e => {
+  if (e.key === 'Enter' && sid) { await api('/api/type', {text: $('type-text').value}); $('type-text').value = ''; }
+});
+$('enter-btn').onclick = async () => { if (sid) await api('/api/key', {key: 'Enter'}); };
+
+function viewXY(e) {
+  const r = live.getBoundingClientRect();
+  return {x: e.clientX - r.left, y: e.clientY - r.top, disp_w: r.width, disp_h: r.height};
+}
+live.addEventListener('click', async e => {
+  if (!sid) return;
+  live.focus(); // focus the view so the keyboard goes to the remote page
+  await api('/api/click', viewXY(e));
+});
+live.addEventListener('contextmenu', async e => {
+  if (!sid) return;
+  e.preventDefault(); // no local browser menu — forward as a remote right-click
+  await api('/api/rightclick', viewXY(e));
+});
+live.addEventListener('dblclick', async e => {
+  if (!sid) return;
+  await api('/api/dblclick', viewXY(e));
+});
+live.addEventListener('mousemove', async e => {
+  if (!sid) return;
+  // Throttle hover: at most one event per 60 ms, or a move of 8+ px.
+  const now = Date.now(), p = viewXY(e);
+  if (now - lastHover < 60 && Math.abs(p.x - lastHoverXY[0]) < 8 && Math.abs(p.y - lastHoverXY[1]) < 8) return;
+  lastHover = now; lastHoverXY = [p.x, p.y];
+  await api('/api/hover', p);
+});
+live.addEventListener('wheel', async e => {
+  if (!sid) return;
+  e.preventDefault();
+  await api('/api/scroll', {dy: e.deltaY});
+}, {passive: false});
+
+// Direct keyboard: every keydown/keyup on the focused live view is
+// forwarded to the remote page. Keep F12 for local devtools; everything
+// else (including Ctrl+R / Ctrl+T style combos) goes to the remote browser.
+function keyPayload(e) {
+  return {key: e.key, code: e.code, ctrl: e.ctrlKey, meta: e.metaKey, shift: e.shiftKey, alt: e.altKey};
+}
+live.addEventListener('keydown', async e => {
+  if (!sid) return;
+  if (e.key === 'F12') return;
+  e.preventDefault();
+  await api('/api/keydown', keyPayload(e));
+});
+live.addEventListener('keyup', async e => {
+  if (!sid) return;
+  if (e.key === 'F12') return;
+  e.preventDefault();
+  await api('/api/keyup', keyPayload(e));
+});
+</script>
+</body>
+</html>
