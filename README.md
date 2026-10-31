@@ -70,10 +70,21 @@ display name. A `default` profile always exists and cannot be deleted.
 
 ## Extensions — unpacked MV3 extensions load into the remote browser
 
+**Opt-in since 2026-10-31:** extensions are OFF by default. Set
+`CLOUD_BROWSER_EXTENSIONS=1` (env var on Render, or in the shell when
+running locally) and restart/redeploy to enable them. The reason is
+memory: loading any extension forces a persistent context on the FULL
+Chromium build, and a single Facebook session in that mode OOM-killed
+the Render free (512 MB) instance 6 times in one evening (23:29–23:49
+PKT, 2026-10-31) — including once after the low-memory flags landed.
+With extensions off the server uses `chromium.launch()`
+(headless-shell build), which is far lighter and is what the Facebook
+rename job needs.
+
 Drop an unpacked Manifest V3 extension folder into `extensions/` and
-restart the server (or redeploy on Render) — the server scans
-`extensions/` at browser launch for subfolders containing a
-`manifest.json` and loads them with `--load-extension`. The included
+restart the server (or redeploy on Render) — with the opt-in on, the
+server scans `extensions/` at browser launch for subfolders containing
+a `manifest.json` and loads them with `--load-extension`. The included
 test extension (`extensions/cb-test/`) marks every page with
 `data-cb-ext="loaded"` and adds a small "CloudBrowser Ext ON" badge,
 proving the extension runs. Extensions are browser-level, so they are
@@ -99,8 +110,10 @@ session keeps the extensions it launched with.
     storage_state starts fresh once extensions are installed (its
     state moves to the profile's user-data-dir). In practice no
     profile had saved state when extensions landed.
-  - With NO extensions installed the launch is exactly as before —
-    same code path, same speed.
+  - With extensions OFF (the default since 2026-10-31) the launch is
+    exactly as before — same code path, same speed, much less memory.
+    The test suite's extension test sets `CLOUD_BROWSER_EXTENSIONS=1`
+    for the server it spawns, so it still exercises extension mode.
 
 ## Live video stream (CDP screencast) — the UI feels like real Chrome
 

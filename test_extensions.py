@@ -15,8 +15,11 @@ Usage:  CLOUD_BROWSER_TOKEN=<token> \
         ~/workspace/fbvenv/bin/python ~/workspace/cloud-browser/test_extensions.py
 Starts the server itself when nothing answers on BASE_URL (default
 http://127.0.0.1:8765, or set BASE_URL); if a server is already running
-there it uses it (and leaves it running). Prints PASS/FAIL per check;
-exit 0 only if all pass. Cleans up its own test profiles at start and end.
+there it uses it (and leaves it running). The test sets
+CLOUD_BROWSER_EXTENSIONS=1 when it starts the server, because
+extensions are opt-in since 2026-10-31 (see server.py find_extensions).
+Prints PASS/FAIL per check; exit 0 only if all pass. Cleans up its own
+test profiles at start and end.
 """
 import json
 import os
@@ -147,6 +150,9 @@ def ensure_server():
     env = dict(os.environ)
     env["CLOUD_BROWSER_TOKEN"] = TOKEN
     env["CLOUD_BROWSER_PORT"] = str(port)
+    # Extensions are opt-in since 2026-10-31; this test must run in
+    # extension mode, so enable them for the server we spawn.
+    env["CLOUD_BROWSER_EXTENSIONS"] = "1"
     _server_proc = subprocess.Popen(
         [sys.executable, os.path.join(HERE, "server.py")],
         cwd=HERE, env=env, stdout=subprocess.DEVNULL,

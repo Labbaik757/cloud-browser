@@ -163,7 +163,19 @@ EXTENSIONS_DIR = os.path.join(BASE_DIR, "extensions")
 def find_extensions():
     """Absolute paths of unpacked extensions to load: each subfolder of
     extensions/ holding a manifest.json. [] when the folder is missing
-    or empty. Sorted, so the launch order is stable."""
+    or empty. Sorted, so the launch order is stable.
+
+    Extensions are OPT-IN since 2026-10-31 (Render free = 512 MB):
+    loading any extension forces launch_persistent_context on the FULL
+    Chromium build, and a single Facebook session in that mode OOM-killed
+    the instance 6 times in one evening (23:29–23:49 PKT) — including
+    once on the new low-memory flags. With no extensions the server uses
+    chromium.launch() (headless-shell build), which is far lighter and
+    is what the rename job needs. Set CLOUD_BROWSER_EXTENSIONS=1 to
+    re-enable extension mode."""
+    if os.environ.get("CLOUD_BROWSER_EXTENSIONS", "").strip().lower() not in (
+            "1", "true", "yes", "on"):
+        return []
     try:
         names = sorted(os.listdir(EXTENSIONS_DIR))
     except OSError:

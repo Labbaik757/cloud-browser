@@ -549,3 +549,29 @@ after the flags: **test_control_v6 42/42, test_profiles 36/36, exit 0**
 — launch still works. If launches still OOM, the next steps are
 dropping the test extension from the image (lighter classic launch) or
 a paid Render plan — both need Afnan's call, neither is done here.
+
+## OOM — flags NOT enough; extensions mode dropped (default) — 2026-10-31 ~23:49 PKT
+
+Dashboard check (read-only, 23:49–23:52 PKT): the v6.1 flags deploy
+(8cdf9e8) DID go live 23:42:59 PKT — so the 23:43–23:44 restore ran on
+the NEW code with the low-memory flags. It still died: instance pvhkv
+(new code) "Ran out of memory (used over 512MB)" at 23:49 PKT; a
+further gx2pj failure at 23:40 PKT was the old code. That is SIX OOM
+failures in one evening (23:29, 23:31, 23:34, 23:36, 23:40, 23:49).
+Verdict: `--disable-gpu` + `--disable-software-rasterizer` +
+`--max-old-space-size=256` do NOT save a single idle Facebook session
+in extensions mode (full Chromium + persistent context) on 512 MB —
+the feed's images/compositor memory is outside the V8 heap cap.
+Service was "Failed service" on the dashboard at 23:51 with no
+recovery event yet (Render auto-restarted it after; /api/status
+answered 401 = up, no session).
+
+Fix (v6.2): extensions are now OPT-IN. `find_extensions()` returns []
+unless `CLOUD_BROWSER_EXTENSIONS=1`, so the default launch is
+`chromium.launch()` (headless-shell build) — far lighter. The cb-test
+extension files stay in the repo; the extension-support code is
+untouched; `test_extensions.py` sets the env var for the server it
+spawns. The Facebook rename job does not use extensions. If a session
+still OOMs in classic mode, the remaining options are a paid Render
+plan (more RAM) or moving the browser to the Oracle VM once that
+account exists — both need Afnan's call.
