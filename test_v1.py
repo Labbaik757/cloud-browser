@@ -96,11 +96,11 @@ def main():
           info.get("title", ""))
     check("button not yet clicked", info.get("status_text") == "Not clicked yet.")
 
-    # 4. Screenshot stream
-    code, png1 = req("GET", "/api/screenshot")
-    check("screenshot is PNG", code == 200 and png1[:8] == b"\x89PNG\r\n\x1a\n",
-          "(%d bytes)" % len(png1))
-    h1 = hashlib.sha256(png1).hexdigest()
+    # 4. Screenshot stream (live CDP screencast — JPEG frames)
+    code, shot1 = req("GET", "/api/screenshot")
+    check("screenshot is JPEG", code == 200 and shot1[:3] == b"\xff\xd8\xff",
+          "(%d bytes)" % len(shot1))
+    h1 = hashlib.sha256(shot1).hexdigest()
 
     # 5. Click the button (coords from the server-reported bounding box)
     box = (info.get("boxes") or {}).get("hello-btn") or {}
@@ -113,9 +113,9 @@ def main():
         check("click button changes page",
               info.get("status_text", "").startswith("Button clicked!"),
               repr(info.get("status_text")))
-    code, png2 = req("GET", "/api/screenshot")
+    code, shot2 = req("GET", "/api/screenshot")
     check("screenshot changes after click",
-          hashlib.sha256(png2).hexdigest() != h1)
+          hashlib.sha256(shot2).hexdigest() != h1)
 
     # 6. Click input + type
     box = (info.get("boxes") or {}).get("name") or {}
@@ -130,12 +130,12 @@ def main():
           repr(info.get("name_value")))
 
     # 7. Scroll
-    code, png3 = req("GET", "/api/screenshot")
+    code, shot3 = req("GET", "/api/screenshot")
     jpost("/api/scroll", {"dy": 800})
     time.sleep(0.8)
-    code, png4 = req("GET", "/api/screenshot")
+    code, shot4 = req("GET", "/api/screenshot")
     check("scroll changes screenshot",
-          hashlib.sha256(png4).hexdigest() != hashlib.sha256(png3).hexdigest())
+          hashlib.sha256(shot4).hexdigest() != hashlib.sha256(shot3).hexdigest())
 
     # 8. UNLIMITED TIME — session must stay alive past 60s
     t0 = time.time()

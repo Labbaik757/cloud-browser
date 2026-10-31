@@ -62,7 +62,7 @@
 </div>
 <div id="meta">Status: <span id="status-line">idle — no session</span> &nbsp;|&nbsp; Session time: <span id="elapsed">--</span> (unlimited)</div>
 <img id="live" tabindex="0" alt="Live view — start a session to see the remote browser">
-<p class="hint">Full control: click the live view, then type on your keyboard — letters, Backspace, Delete, Tab, arrows, Escape, Ctrl+A/C/V/X all go to the remote browser. Right-click and double-click work on the view; hover works too. Go navigates the SAME session (no restart). Screenshot refreshes every 500 ms while a session is live. Default page is the local test page (this VM has no internet path in Chromium, so live sites are unproven here). No time limit — session ends only on Stop.</p>
+<p class="hint">Full control: click the live view, then type on your keyboard — letters, Backspace, Delete, Tab, arrows, Escape, Ctrl+A/C/V/X all go to the remote browser. Right-click and double-click work on the view; hover works too. Go navigates the SAME session (no restart). Live video stream (~10 fps; polling pauses while this tab is hidden). Default page is the local test page (this VM has no internet path in Chromium, so live sites are unproven here). No time limit — session ends only on Stop.</p>
 
 <script>
 const $ = id => document.getElementById(id);
@@ -153,6 +153,7 @@ $('profile-delete').onclick = async () => {
   await refreshProfiles();
 };
 
+let shotCount = 0;
 async function refreshShot() {
   if (!sid) return;
   try {
@@ -160,7 +161,16 @@ async function refreshShot() {
     if (token) headers['X-Cloud-Token'] = token;
     const r = await fetch('/api/screenshot?sid=' + sid + '&t=' + Date.now(), {headers});
     if (!r.ok) { await endSession('session ended'); return; }
-    live.src = URL.createObjectURL(await r.blob());
+    // Revoke the previous frame's object URL once the new one loads —
+    // at ~10 fps the old code leaked one blob URL per poll.
+    const prevUrl = live.dataset.blobUrl;
+    const url = URL.createObjectURL(await r.blob());
+    live.dataset.blobUrl = url;
+    live.onload = () => { if (prevUrl) URL.revokeObjectURL(prevUrl); };
+    live.src = url;
+    // Status (elapsed, title, URL sync) only needs ~1 Hz, not 10 Hz.
+    shotCount++;
+    if (shotCount % 10 !== 1) return;
     const s = await api('/api/status');
     if (s.active) {
       $('elapsed').textContent = s.elapsed + 's';
@@ -173,13 +183,29 @@ async function refreshShot() {
   } catch (e) { /* transient poll error — keep trying until status says dead */ }
 }
 
+// Poll the live stream at ~10 fps. Pause while this tab is hidden
+// (saves bandwidth); resume when visible again. The session keeps
+// running server-side while paused.
+function startPolling() {
+  if (pollTimer || !sid) return;
+  pollTimer = setInterval(refreshShot, 100);
+  refreshShot();
+}
+function stopPolling() {
+  if (pollTimer) { clearInterval(pollTimer); pollTimer = null; }
+}
+document.addEventListener('visibilitychange', () => {
+  if (document.hidden) stopPolling();
+  else if (sid) startPolling();
+});
+
 function setNavEnabled(on) {
   $('back').disabled = !on; $('forward').disabled = !on; $('reload').disabled = !on;
 }
 
 function endSession(msg) {
   sid = null;
-  clearInterval(pollTimer); pollTimer = null;
+  stopPolling();
   $('start').disabled = false; $('start').textContent = 'Start Session';
   $('stop').disabled = true; setNavEnabled(false);
   $('elapsed').textContent = '--';
@@ -205,8 +231,7 @@ async function goOrStart() {
   $('stop').disabled = false; setNavEnabled(true);
   $('start').textContent = 'Go';
   $('elapsed').textContent = '0s';
-  pollTimer = setInterval(refreshShot, 500);
-  refreshShot();
+  startPolling();
   live.focus();
 }
 $('go').onclick = goOrStart;

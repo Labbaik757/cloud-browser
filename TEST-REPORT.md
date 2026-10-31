@@ -1,9 +1,91 @@
-# TEST-REPORT.md — Cloud Browser v2 (full control)
+# TEST-REPORT.md — Cloud Browser v3 (full control + live video stream)
 
 Date: 2026-10-30. Tester: automated scripts `test_v1.py` + `test_v2.py`
 (driving the HTTP API exactly as the UI does) + manual curl checks. All
 commands run with `~/workspace/fbvenv/bin/python` (Python 3.12.3, Playwright
 + Chromium 1248 from `~/.cache/ms-playwright/`).
+
+## SCREENCAST — live video stream instead of screenshot polling, 2026-10-31
+
+Afnan: the browser does not feel like real Chrome because the UI shows
+still screenshots at ~2 fps. Built into `server.py`: the worker opens a
+CDP session on the live page (`context.new_cdp_session(page)`) and calls
+`Page.startScreencast` (JPEG, quality 65, maxWidth 1280,
+everyNthFrame=1). `Page.screencastFrame` events are acked with
+`Page.screencastFrameAck` and the latest frame is cached; `GET
+/api/screenshot` serves that cached frame (same URL, same token auth,
+same JPEG response shape). The UI polls every 100 ms (was ~500 ms) and
+pauses polling while the tab is hidden (`document.hidden`). New
+`GET /api/screencast-stats` reports `{screencast_on, frames,
+bytes_total}`. `test_v1.py` updated: the screenshot assertion is now
+JPEG (`\xff\xd8\xff`), not PNG.
+
+**Three real bugs found by measuring, not by guessing:**
+- **Wrong CDP event name.** Subscribing to bare `screencastFrame`
+  never fires — Playwright's `CDPSession` emits the full method name,
+  `Page.screencastFrame` (read from its `_cdp_session.py`). The stream
+  stayed at 0 frames until this was fixed.
+- **everyNthFrame=6 is too slow on a damage-driven page.** The
+  compositor only produces frames on damage, so skipping 5 of 6 gave
+  0.7 fps on a page changing every 150 ms. everyNthFrame=1 (forward
+  every damage frame) — the UI's 100 ms poll caps what the user sees.
+- **Headless Chromium does not composite on damage alone.** With an
+  animation changing the DOM every 150 ms, the stream delivered ZERO
+  frames in 10 s with no other traffic — `bring_to_front` and the
+  `--disable-backgrounding-occluded-windows` /
+  `--disable-renderer-backgrounding` /
+  `--disable-background-timer-throttling` flags did not help. What
+  produces frames is a `page.evaluate`: ~1 frame per evaluate. So the
+  worker pokes the compositor with a tiny DOM read
+  (`document.title`) every ~100 ms, only while a session is live and
+  the screencast is on. The poke is time-gated (at most 1 per 100 ms)
+  and runs both when the job queue is idle and after each job — a
+  client polling `/api/screenshot` every 50 ms starved the idle-only
+  poke and click latency was 1.03 s until the after-job poke was
+  added (now 0.11–0.16 s).
+- **Fallback screenshots can starve the acks.** The first design took
+  a blocking `page.screenshot` on every poll while the frame was stale;
+  each shot saturates the worker queue and delays the acks the
+  screencast needs to deliver its next frame (stream ran at ~0.7 fps
+  while every poll took a shot). The fallback is now rate-limited to
+  one shot per 2 s; between shots the cached frame is returned.
+
+**Results — 2026-10-31, screencast suite: 44/44 passed, exit 0
+(~17 s).** Three sub-suites in one file (token from env):
+- **Extensions mode (the folder as shipped, `extensions/` present):
+  21/21.** UI loads; UI polls at 100 ms + pauses when hidden;
+  start session; first frame arrives (JPEG); button box; click changes
+  the page; **frame changes within ~1 s of the click — latency
+  0.16 s**; screencast ON with frames flowing; animation started;
+  **bandwidth while the page changed every 150 ms: server fps 6.7,
+  average frame 42,338 bytes, ~16.9 MB/min, 20 distinct frames in 29
+  samples**; static page: only 2 distinct frames in 2 s (the poke
+  does not flood a static page); create + switch to profile B (session
+  ends); frame arrives in B and screencast ON with frames flowing
+  (CDP works in the persistent-context page too); Stop ends the
+  session; screenshot 410 after Stop.
+- **Classic mode (temp copy without `extensions/`, port 8766):
+  15/15.** Same core checks; click latency 0.11 s; screencast ON with
+  frames flowing; profile B works there too.
+- **Fallback probe (temp copy with `new_cdp_session` patched to
+  raise, port 8767): 8/8.** Screencast OFF, session still starts,
+  screenshot returns JPEG via the fallback, frame changes after a
+  click, Stop ends cleanly.
+- **Regressions, all with the screencast code live: v1 19/19, v2
+  37/37, profiles 36/36, extensions 17/17 — 109/109 passed.**
+- **Combined: 153/153 passed** (44 screencast + 109 regression).
+  Cleanup: test servers stopped; test profiles cleaned up;
+  `profiles/`, `profiles.json`, `port.txt` removed so the folder
+  ships clean.
+
+**Limits (honest):** the ~6.7 fps / ~17 MB/min is measured on the
+local test page while it changes every 150 ms; a continuously
+animating page (video, 60 fps animation) makes Chromium encode more
+frames server-side — the UI still only fetches ~10 fps, but the host
+CPU does the extra encoding, so Render free (0.1 CPU) may feel
+sluggish on heavy animated pages. Live internet on this VM still does
+not work (local test pages only); the deployed Render service has
+internet. The laptop zip was NOT rebuilt here (parent does that).
 
 ## TOKEN AUTH — 2026-10-30 ~20:45 PKT (public link must not be open to anyone)
 

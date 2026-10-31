@@ -1,8 +1,8 @@
-# Cloud Browser v2 — full control (self-built prototype)
+# Cloud Browser v3 — full control (self-built prototype)
 
 A cloud browser like Browser.lol / NetworkChuck Cloud Browser, built
 from scratch. A web UI starts a fresh, disposable Playwright Chromium session
-on the host machine, streams screenshots back to the page, and gives you
+on the host machine, streams a live video feed back to the page, and gives you
 FULL CONTROL of that remote browser: click the live view and type directly
 into it, right-click, double-click, hover, Back / Forward / Reload, and
 navigate in the same session — everything goes to the remote browser.
@@ -98,11 +98,57 @@ session keeps the extensions it launched with.
   - With NO extensions installed the launch is exactly as before —
     same code path, same speed.
 
+## Live video stream (CDP screencast) — the UI feels like real Chrome
+
+The live view used to be a still screenshot polled ~2 times a second.
+Now the server runs a **CDP screencast** on the live page
+(`Page.startScreencast`, JPEG quality 65, 1280 px wide, every damage
+frame forwarded) and `GET /api/screenshot` serves the newest frame
+from the cache. The UI polls it every **100 ms** and pauses polling
+while the browser tab is hidden (`document.hidden`), so it feels like
+driving real Chrome instead of watching stills. Same URL, same token
+auth, same response shape — only the internals changed.
+
+- **How it works (honest):** Playwright already drives real Chromium;
+  the gap was presentation, not the engine. The worker opens a CDP
+  session on the live page, listens for `Page.screencastFrame` events
+  (note: the event name is the full CDP method — bare
+  `screencastFrame` never fires), acks each frame with
+  `Page.screencastFrameAck`, and caches the latest JPEG. The stream
+  restarts on every new session and after every profile switch, and
+  stops (`Page.stopScreencast`) when the session stops.
+- **The headless catch:** headless Chromium does NOT composite on
+  damage alone — measured 2026-10-31, an animation changing the DOM
+  every 150 ms produced **zero frames in 10 s** with no other traffic
+  (`bring_to_front` and the `--disable-backgrounding-*` flags did not
+  help). So the worker pokes the compositor with a tiny DOM read
+  (`document.title`) every ~100 ms, only while a session is live and
+  the screencast is on, and time-gated so a fast-polling client cannot
+  starve it. That is what makes frames flow. A static page has no
+  damage to flush, so the poke produces no extra frames there.
+- **Fallback:** if the screencast fails to start, or its frame goes
+  stale, `/api/screenshot` falls back to a `page.screenshot` (JPEG) —
+  rate-limited to one shot per 2 s, so a dead stream can never
+  saturate the worker and starve the acks. The session never freezes
+  and a failed screencast never kills it. `GET /api/screencast-stats`
+  reports `{screencast_on, frames, bytes_total}` for the session.
+- **Bandwidth (measured 2026-10-31, local test page):** while the page
+  changed every 150 ms the stream delivered **~6.7 fps, average frame
+  ~42 KB, ~17 MB/min**; a click's result appeared in the view in
+  **~0.1–0.2 s**. A static page streams almost nothing (2 distinct
+  frames in 2 s). The UI's 100 ms poll caps what the user sees at
+  ~10 fps, so the network cost stays near the measured rate even if
+  the remote page animates faster.
+- **Limits:** a continuously animating page (video, 60 fps animation)
+  makes Chromium encode more frames server-side — the UI still only
+  fetches ~10 fps, but the host CPU does the extra encoding. On
+  Render free (0.1 CPU) a heavy animated page may feel sluggish.
+
 ## Files
 
 | File | What it is |
 |---|---|
-| `server.py` | Stdlib `http.server` + Playwright. Serves the UI, owns the session, forwards all input, streams screenshots. Token auth on every `/api/*` route. |
+| `server.py` | Stdlib `http.server` + Playwright. Serves the UI, owns the session, forwards all input, streams the live video feed. Token auth on every `/api/*` route. |
 | `index.html` | The UI: token Unlock box, URL bar, Go / Start / Stop, Back / Forward / Reload, live view with direct keyboard, right/double-click, hover, wheel-scroll, session-time display. |
 | `LAPTOP-SETUP.md` | Windows laptop setup: Python, Playwright, cloudflared, Quick Tunnel, what to do when each step fails. |
 | `start-cloud-browser.bat` | Double-click launcher for the Windows laptop: installs Playwright if missing, makes/saves a token, starts the server + Quick Tunnel. |
@@ -113,8 +159,9 @@ session keeps the extensions it launched with.
 | `test_profiles.py` | Profiles end-to-end test (create/select/delete, localStorage isolation + persistence across switches, token 401 checks). |
 | `extensions/cb-test/` | Test extension (MV3, no deps): content script marks every page `data-cb-ext="loaded"` and adds a "CloudBrowser Ext ON" badge. Drop other unpacked MV3 folders beside it. |
 | `test_extensions.py` | Extensions end-to-end test (marker + badge, survives reload, marker survives profile switches, token 401 checks). |
+| `test_screencast.py` | Live-stream end-to-end test (frame changes after a click within ~1 s, stream delivers frames while the page changes + bandwidth measurement, stream survives a profile switch, fallback when CDP fails, token checks). Runs in extensions mode, classic mode, and a simulated-CDP-failure mode. |
 | `profiles.json` + `profiles/` | Runtime state, created on first use (not shipped): profile registry + each profile's saved cookies/localStorage (`profiles/<id>.json`; in extensions mode, the profile's own user-data-dir `profiles/<id>/`). |
-| `TEST-REPORT.md` | Exact test commands and honest pass/fail results (v2: 33/33, v1 regression: 16/16, plus auth checks). |
+| `TEST-REPORT.md` | Exact test commands and honest pass/fail results for every suite. |
 
 ## Run it
 
@@ -199,7 +246,8 @@ Every `/api/*` route needs the token: header `X-Cloud-Token`, or
 | `POST` | `/api/navigate` `{"url": ...}` | Go to a URL in the current live session (error if none live) |
 | `POST` | `/api/back` / `/api/forward` | History Back / Forward in the live session |
 | `POST` | `/api/reload` | Reload the live session's page |
-| `GET` | `/api/screenshot` | Latest PNG screenshot of the remote browser |
+| `GET` | `/api/screenshot` | Latest live-video frame (JPEG) from the CDP screencast — or a fresh screenshot if the stream is off/stale |
+| `GET` | `/api/screencast-stats` | `{screencast_on, frames, bytes_total}` for the current session |
 | `GET` | `/api/status` | `{active, sid, url, title, elapsed}` |
 | `GET` | `/api/info` | Page title/URL/text, input value, element boxes, focused element, history length |
 | `POST` | `/api/click` `{"x","y","disp_w","disp_h"}` | Left-click in the remote browser (coords scaled to 1280×720) |

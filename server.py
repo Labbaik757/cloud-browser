@@ -22,6 +22,12 @@ isolated logins: each profile's cookies + localStorage persist in
 profiles/<id>.json (Playwright storage_state) and are reloaded when that
 profile becomes active; one profile is active at a time (see README).
 
+Live video: the UI shows a CDP screencast (Page.startScreencast, JPEG,
+every damage frame forwarded; the UI polls ~10 fps) instead of one
+screenshot per poll — see _start_screencast_locked. If the screencast
+fails or stalls, /api/screenshot falls back to a one-off page.screenshot,
+so the session never freezes.
+
 Stack: Python 3.12 stdlib http.server + Playwright (sync API, from fbvenv).
 Playwright is NOT thread-safe across threads, so ALL Playwright calls run in
 one dedicated worker thread, marshalled through a queue. HTTP handlers only
@@ -48,6 +54,7 @@ egress fails, even example.org fails in Chromium). So v2 is proven ONLY
 against the local test pages served by this same server. Live internet
 browsing is UNPROVEN on the VM and needs a host with internet (Afnan's PC).
 """
+import base64
 import hmac
 import json
 import mimetypes
@@ -78,6 +85,18 @@ FALLBACK_PORTS = [8765, 8766, 8767, 8080, 8000, 9000, 5000, 3000]
 HOST = os.environ.get("CLOUD_BROWSER_HOST", "0.0.0.0")
 VIEWPORT = {"width": 1280, "height": 720}
 # No time limit: sessions run unlimited until explicit Stop (Afnan correction).
+
+# Chromium launch flags shared by both launch paths. The last three keep
+# the compositor and timers unthrottled: a headless page counts as
+# occluded/hidden, and Chrome throttles its BeginFrames and timers to
+# ~1 Hz without them. They do NOT make the screencast flow on their own
+# (measured 2026-10-31: still 0.7 fps with everyNthFrame=1 after adding
+# them) — the compositor poke in _poke_screencast is what drives frames.
+# They stay as belt-and-braces for timers and real pages.
+CHROMIUM_ARGS = ["--no-sandbox", "--disable-dev-shm-usage",
+                 "--disable-backgrounding-occluded-windows",
+                 "--disable-renderer-backgrounding",
+                 "--disable-background-timer-throttling"]
 
 # PROFILES: separate isolated logins (cookies + localStorage). Each profile
 # is an id (slug of its name) + a display name. The registry (id -> name,
@@ -154,6 +173,21 @@ class BrowserWorker(threading.Thread):
         # combo presses (Ctrl+A etc., done as a single press()) are tracked
         # separately and not double-released.
         self._down_keys = set()
+        # SCREENCAST (CDP live stream): the latest JPEG frame from
+        # Page.screencastFrame, plus ack bookkeeping. The event handler
+        # runs on Playwright's driver thread, NOT the worker thread — it
+        # only stores bytes under _frame_lock and enqueues the ack job;
+        # every Playwright call stays on the worker thread.
+        self._cdp = None
+        self._screencast_on = False
+        self._frame_lock = threading.Lock()
+        self._frame = None            # latest JPEG bytes
+        self._frame_ts = 0.0          # when the latest frame arrived
+        self._frame_seq = 0           # frames received, current session
+        self._frame_bytes_total = 0
+        self._pending_ack = None      # screencastFrame sessionId awaiting ack
+        self._last_fallback_ts = 0.0  # last rate-limited fallback shot
+        self._last_poke_ts = 0.0       # last compositor poke (rate limit)
 
     # -- queue plumbing ------------------------------------------------------
     def call(self, fn, timeout=30):
@@ -177,11 +211,47 @@ class BrowserWorker(threading.Thread):
 
     def run(self):
         while True:
-            job = self.q.get()
+            try:
+                job = self.q.get(timeout=0.1)
+            except queue.Empty:
+                self._poke_screencast()
+                continue
             try:
                 job()
             except Exception:
                 pass  # job() already captures its own errors
+            # Poke on a time basis, not just when idle: a client polling
+            # /api/screenshot every 50 ms would otherwise starve the
+            # poke (q.get never times out) and the stream would stall
+            # — measured 2026-10-31, click latency 1.03 s until the
+            # poke also ran after each job.
+            self._poke_screencast()
+
+    def _poke_screencast(self):
+        """Kick the compositor so the screencast produces its next frame.
+        Headless Chromium does not composite on damage alone: measured
+        2026-10-31, an animation changing the DOM every 150 ms produced
+        ZERO frames in 10 s with no other traffic, and ~1 frame per
+        page.evaluate when the test polled (bring_to_front and the
+        --disable-backgrounding-* flags did not help). A tiny DOM read
+        every ~100 ms, only while a session is live and the screencast
+        is on, keeps the stream flowing at ~10 fps while the page
+        changes. Time-gated (at most 1 poke per 100 ms) and called both
+        when the queue is idle and after each job, so a fast-polling
+        client cannot starve it. Runs on the worker thread, so it never
+        delays real work by more than the evaluate itself; a static
+        page has no damage to flush, so it produces no extra frames
+        there."""
+        now = time.time()
+        if now - self._last_poke_ts < 0.1:
+            return
+        self._last_poke_ts = now
+        if self.page is None or not self._screencast_on:
+            return
+        try:
+            self.page.evaluate("() => document.title")
+        except Exception:
+            pass
 
     # -- session lifecycle (all run on the worker thread) --------------------
     # -- profiles ------------------------------------------------------------
@@ -296,6 +366,9 @@ class BrowserWorker(threading.Thread):
         next start relaunches it for the (possibly new) active profile."""
         if save:
             self._save_state_locked()
+        # Stop the screencast BEFORE the page/context closes (the CDP
+        # session dies with them); a later start re-creates it.
+        self._stop_screencast_locked()
         try:
             if self.page is not None:
                 self.page.close()
@@ -326,7 +399,7 @@ class BrowserWorker(threading.Thread):
             # No extensions: launch exactly as before.
             self.browser = self.playwright.chromium.launch(
                 headless=True,
-                args=["--no-sandbox", "--disable-dev-shm-usage"],
+                args=CHROMIUM_ARGS,
             )
             self.persistent_context = None
             return
@@ -345,9 +418,9 @@ class BrowserWorker(threading.Thread):
         os.makedirs(user_data_dir, exist_ok=True)
         self.persistent_context = self.playwright.chromium.launch_persistent_context(
             user_data_dir, headless=True, channel="chromium",
-            args=["--no-sandbox", "--disable-dev-shm-usage",
-                  "--disable-extensions-except=" + ext_arg,
-                  "--load-extension=" + ext_arg],
+            args=CHROMIUM_ARGS + [
+                "--disable-extensions-except=" + ext_arg,
+                "--load-extension=" + ext_arg],
             ignore_default_args=["--disable-extensions"],
             viewport=VIEWPORT, ignore_https_errors=True)
         self.browser = self.persistent_context.browser
@@ -369,6 +442,112 @@ class BrowserWorker(threading.Thread):
             pass
         return self.browser.new_context(
             viewport=VIEWPORT, ignore_https_errors=True)
+
+    # -- CDP screencast (live video stream) ---------------------------------
+    # /api/screenshot used to take a fresh page.screenshot per poll (~2 fps
+    # still images). Now the worker runs a CDP screencast on the live page
+    # (Page.startScreencast, JPEG q65, 1280 wide) and /api/screenshot
+    # serves the newest frame from the cache — the UI feels like live video
+    # instead of stills. everyNthFrame=1 (forward EVERY damage frame):
+    # skipping any would delay a lone click/typing until the next repaint
+    # — measured 2026-10-31, everyNthFrame=6 gave 0.7 fps on a page
+    # changing every 150 ms. Headless Chromium does NOT composite on
+    # damage alone (0 frames in 10 s with an animation running), so the
+    # worker also pokes the compositor with a tiny DOM read every ~100 ms
+    # (see _poke_screencast) — that is what makes frames flow. The UI
+    # polls at ~10 Hz, which caps what the user sees; the server-side
+    # rate follows page activity. When the screencast is off, stalled,
+    # or has not delivered a frame yet, screenshot() falls back to a
+    # rate-limited page.screenshot (JPEG), so the UI never freezes and a
+    # failed screencast never kills the session.
+    def _on_screencast_frame(self, payload):
+        """CDP Page.screencastFrame handler. Runs on Playwright's driver
+        thread — pure Python only: decode + store the frame, remember its
+        sessionId for ack, enqueue the ack job on the worker queue.
+        NEVER call Playwright APIs here (they belong to the worker
+        thread and would deadlock)."""
+        try:
+            data = base64.b64decode(payload.get("data") or "")
+            sid = payload.get("sessionId")
+        except Exception:
+            return
+        if not data:
+            return
+        with self._frame_lock:
+            self._frame = data
+            self._frame_ts = time.time()
+            self._frame_seq += 1
+            self._frame_bytes_total += len(data)
+            self._pending_ack = sid
+        try:
+            self.q.put(self._ack_job)
+        except Exception:
+            pass
+
+    def _ack_job(self):
+        """Ack the latest unacked screencast frame (worker thread only).
+        Chromium sends the next frame only after an ack, so this keeps
+        the stream flowing. Only the latest sessionId is acked; older
+        unacked frames are superseded by the newer one."""
+        with self._frame_lock:
+            sid = self._pending_ack
+            self._pending_ack = None
+            cdp = self._cdp
+        if not sid or cdp is None:
+            return
+        try:
+            cdp.send("Page.screencastFrameAck", {"sessionId": sid})
+        except Exception:
+            pass
+
+    def _start_screencast_locked(self):
+        """Start CDP screencast on the live page (worker thread).
+        Best-effort: any failure logs and leaves screencast OFF —
+        screenshot() then falls back to page.screenshot, so the session
+        still works. Works on the persistent-context page too (CDP is a
+        page-target feature, not an extension)."""
+        self._stop_screencast_locked()
+        if self.page is None:
+            return
+        try:
+            self._cdp = self.context.new_cdp_session(self.page)
+            # Event name is the FULL CDP method: "Page.screencastFrame"
+            # (CDPSession emits params["method"]). Subscribing to bare
+            # "screencastFrame" never fires — verified 2026-10-31: the
+            # stream stayed at 0 frames with that name.
+            self._cdp.on("Page.screencastFrame", self._on_screencast_frame)
+            self._cdp.send("Page.startScreencast", {
+                "format": "jpeg", "quality": 65,
+                "maxWidth": 1280, "everyNthFrame": 1})
+            self._screencast_on = True
+        except Exception as e:
+            print("[screencast] start failed, falling back to screenshots: %s" % e, flush=True)
+            self._cdp = None
+            self._screencast_on = False
+
+    def _stop_screencast_locked(self):
+        """Stop screencast and drop the CDP session (worker thread).
+        Called before the page/context closes, and before a restart."""
+        cdp = self._cdp
+        self._cdp = None
+        self._screencast_on = False
+        with self._frame_lock:
+            self._pending_ack = None
+            self._frame = None
+            self._frame_ts = 0.0
+        if cdp is not None:
+            try:
+                cdp.send("Page.stopScreencast")
+            except Exception:
+                pass
+
+    def screencast_stats(self):
+        """Frames received + bytes, for bandwidth measurement (test /
+        debug helper, behind the same token auth)."""
+        with self._frame_lock:
+            return {"screencast_on": self._screencast_on,
+                    "frames": self._frame_seq,
+                    "bytes_total": self._frame_bytes_total}
 
     def evaluate(self, js):
         """Run a JS expression in the live page (test/debug helper,
@@ -418,6 +597,21 @@ class BrowserWorker(threading.Thread):
         self.sid = "sess-%d" % int(time.time())
         self.started_at = time.time()
         self.url = url
+        # Headless pages are not the foreground tab, and the compositor
+        # then only produces frames on demand — the screencast starves
+        # (measured 2026-10-31: 3 frames in 10 s with an animation
+        # running, no polls). bring_to_front makes this the active tab
+        # so the compositor produces frames on its own.
+        try:
+            self.page.bring_to_front()
+        except Exception:
+            pass
+        # Live video stream from here on: CDP screencast on the new page.
+        # A failed start only falls back to per-poll screenshots.
+        # Counters are per-session (screencast_stats reports this session).
+        self._frame_seq = 0
+        self._frame_bytes_total = 0
+        self._start_screencast_locked()
         return {"sid": self.sid, "url": url, "title": self.page.title(),
                 "navigated": False}
 
@@ -426,6 +620,10 @@ class BrowserWorker(threading.Thread):
         if self.page is None or self.sid is None:
             raise RuntimeError("no active session")
         self.page.goto(url, timeout=15000, wait_until="domcontentloaded")
+        try:
+            self.page.bring_to_front()
+        except Exception:
+            pass
         self.url = url
         return {"sid": self.sid, "url": url, "title": self.page.title()}
 
@@ -480,9 +678,41 @@ class BrowserWorker(threading.Thread):
                 "elapsed": int(time.time() - self.started_at)}
 
     def screenshot(self):
+        """Latest frame as JPEG bytes. While the CDP screencast is live,
+        this is the newest screencast frame (no page.screenshot call —
+        that is the whole point of the stream). When the screencast is
+        off, stalled (no frame for 2s), or has not delivered a frame
+        yet, fall back to a page.screenshot (JPEG) so the UI never
+        freezes. Raises when no session is live (HTTP 410)."""
         if self.page is None:
             raise RuntimeError("no active session")
-        return self.page.screenshot(type="png")
+        if self._screencast_on:
+            with self._frame_lock:
+                frame = self._frame
+                ts = self._frame_ts
+                age = time.time() - ts if ts else 1e9
+                last_fb = self._last_fallback_ts
+            if frame is not None and age < 2.0:
+                return frame
+            # Screencast on but no fresh frame. NEVER take a blocking
+            # page.screenshot on every poll: each shot saturates the
+            # worker queue and starves the acks the screencast needs
+            # to deliver its next frame — measured 2026-10-31, the
+            # stream ran at ~0.7 fps while every poll took a shot.
+            # At most one fallback shot per 2 s; between shots return
+            # the cached frame (stale but correct if the page is
+            # static), and the UI still refreshes at ~0.5 fps even
+            # if the stream has genuinely died.
+            if frame is not None and time.time() - last_fb < 2.0:
+                return frame
+            self._last_fallback_ts = time.time()
+            shot = self.page.screenshot(type="jpeg", quality=65)
+            with self._frame_lock:
+                if self._frame_ts <= ts:
+                    self._frame = shot
+                    self._frame_ts = time.time()
+            return shot
+        return self.page.screenshot(type="jpeg", quality=65)
 
     def click(self, x, y, disp_w, disp_h):
         if self.page is None:
@@ -680,15 +910,17 @@ class Handler(BaseHTTPRequestHandler):
                 self._send_json(WORKER.call(WORKER.status))
             elif u.path == "/api/screenshot":
                 try:
-                    png = WORKER.call(WORKER.screenshot, timeout=15)
+                    img = WORKER.call(WORKER.screenshot, timeout=15)
                 except Exception as e:
                     self._send_json({"error": str(e)}, code=410)
                     return
                 self.send_response(200)
-                self.send_header("Content-Type", "image/png")
-                self.send_header("Content-Length", str(len(png)))
+                self.send_header("Content-Type", "image/jpeg")
+                self.send_header("Content-Length", str(len(img)))
                 self.end_headers()
-                self.wfile.write(png)
+                self.wfile.write(img)
+            elif u.path == "/api/screencast-stats":
+                self._send_json(WORKER.call(WORKER.screencast_stats))
             elif u.path == "/api/info":
                 try:
                     self._send_json(WORKER.call(WORKER.info, timeout=15))
