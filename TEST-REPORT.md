@@ -519,3 +519,33 @@ proof), validation errors (4), upload to visible + hidden inputs,
 chooser arm + fired + file on the page, upload validation (2), select,
 drag (10 mousemoves), middle-click, stop. Regression the same day:
 **profiles 36/36, v2 37/37, v1 19/19 — 134/134 total, exit 0.**
+
+## OOM on Render free (512 MB) — 2026-10-31 ~23:29–23:36 PKT, v6.1 patch
+
+Render alert: the service exceeded its memory limit and auto-restarted.
+Dashboard diagnosis (read-only, 2026-10-31 23:36–23:39 PKT): NOT one
+restart but FOUR "Instance failed" events — "Ran out of memory (used
+over 512MB) while running your code." — at 23:29:27, 23:31:11, 23:34:50
+and 23:36:38 PKT, each followed by an automatic restart. Before EVERY
+failure the logs show the same sequence within seconds: POST
+/api/profile/create, POST /api/profile/select, "Extensions found:
+/app/extensions/cb-test" (browser launch), POST /api/start, POST
+/api/cookies, GET /api/cookies — i.e. each failure hit during/just
+after a fresh browser launch + cookie inject. No OOM/Killed/Traceback/
+Playwright/Error lines exist in the app logs (the message is a Render
+platform event only); the memory graph is a PAID Render feature, so
+gradual climb vs sudden spike cannot be determined from the dashboard.
+The v6 deploy went live 23:16; the failures began ~13 min later. The
+live v6 verification session (Kristen logged in, 23:18–23:19) succeeded
+before the failures — the launches that died came after it.
+
+Fix (v6.1 patch, same v6 banner): low-memory Chromium flags in
+`CHROMIUM_ARGS` — `--disable-gpu`, `--disable-software-rasterizer`,
+`--js-flags=--max-old-space-size=256` (caps each renderer's V8 heap).
+Deliberately NOT `--disable-extensions` (would break extensions mode)
+and NOT `--single-process`/`--no-zygote` (desktop variant segfaulted on
+`--single-process`; the zygote shares memory via fork). Local re-test
+after the flags: **test_control_v6 42/42, test_profiles 36/36, exit 0**
+— launch still works. If launches still OOM, the next steps are
+dropping the test extension from the image (lighter classic launch) or
+a paid Render plan — both need Afnan's call, neither is done here.

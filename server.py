@@ -115,7 +115,18 @@ VIEWPORT = {"width": 1280, "height": 720}
 CHROMIUM_ARGS = ["--no-sandbox", "--disable-dev-shm-usage",
                  "--disable-backgrounding-occluded-windows",
                  "--disable-renderer-backgrounding",
-                 "--disable-background-timer-throttling"]
+                 "--disable-background-timer-throttling",
+                 # LOW-MEMORY (Render free = 512 MB; the service OOM-restarted
+                 # 2026-10-31 after a live Facebook session): no GPU process
+                 # and no SwiftShader software rasterizer (both allocate
+                 # memory headless Chromium never uses), and cap each
+                 # renderer's V8 heap at 256 MB so one greedy page cannot
+                 # eat the whole box. Deliberately NOT --disable-extensions
+                 # (would break extensions mode) and NOT --single-process /
+                 # --no-zygote (the desktop variant segfaulted on
+                 # --single-process; the zygote shares memory via fork).
+                 "--disable-gpu", "--disable-software-rasterizer",
+                 "--js-flags=--max-old-space-size=256"]
 
 # PROFILES: separate isolated logins (cookies + localStorage). Each profile
 # is an id (slug of its name) + a display name. The registry (id -> name,
