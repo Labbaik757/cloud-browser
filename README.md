@@ -1,4 +1,4 @@
-# Cloud Browser v3 — full control (self-built prototype)
+# Cloud Browser v6 — full control (self-built prototype)
 
 A cloud browser like Browser.lol / NetworkChuck Cloud Browser, built
 from scratch. A web UI starts a fresh, disposable Playwright Chromium session
@@ -6,6 +6,10 @@ on the host machine, streams a live video feed back to the page, and gives you
 FULL CONTROL of that remote browser: click the live view and type directly
 into it, right-click, double-click, hover, Back / Forward / Reload, and
 navigate in the same session — everything goes to the remote browser.
+**v6 adds cookie login** (paste a cookie string, the live session logs into
+that account — HttpOnly cookies included) **and file upload** (feed a file
+to the remote page's file input, or arm the native file dialog), plus
+dropdown select, mouse drag, and middle-click.
 
 **Unlimited time — no time limit at all.** A session runs until you click
 Stop. (A 60-second timer was in the first draft and was removed on Afnan's
@@ -149,14 +153,15 @@ auth, same response shape — only the internals changed.
 | File | What it is |
 |---|---|
 | `server.py` | Stdlib `http.server` + Playwright. Serves the UI, owns the session, forwards all input, streams the live video feed. Token auth on every `/api/*` route. |
-| `index.html` | The UI: token Unlock box, URL bar, Go / Start / Stop, Back / Forward / Reload, live view with direct keyboard, right/double-click, hover, wheel-scroll, session-time display. |
+| `index.html` | The UI: token Unlock box, URL bar, Go / Start / Stop, Back / Forward / Reload, live view with direct keyboard, right/double-click, hover, wheel-scroll, session-time display, cookie inject + file upload sections. |
 | `LAPTOP-SETUP.md` | Windows laptop setup: Python, Playwright, cloudflared, Quick Tunnel, what to do when each step fails. |
 | `start-cloud-browser.bat` | Double-click launcher for the Windows laptop: installs Playwright if missing, makes/saves a token, starts the server + Quick Tunnel. |
-| `test-page.html` | Local test page (heading, input, click-me button, scroll target, hover / right-click / double-click boxes, link to page 2). |
+| `test-page.html` | Local test page (heading, input, click-me button, scroll target, hover / right-click / double-click boxes, link to page 2, plus v6 controls: file inputs, select, drag box, middle-click box). |
 | `test-page2.html` | Second local test page (Back/Forward + navigate-in-session proof). |
 | `test_v1.py` | v1 end-to-end test (UI, click, type-box, scroll, unlimited-time proof, token 401 checks). |
 | `test_v2.py` | v2 end-to-end test (direct keyboard, Back/Forward/Reload, navigate in session, right/double-click, hover, token 401 checks). |
 | `test_profiles.py` | Profiles end-to-end test (create/select/delete, localStorage isolation + persistence across switches, token 401 checks). |
+| `test_control_v6.py` | v6 end-to-end test (cookie login incl. HttpOnly proof, file upload incl. hidden input + chooser-arm, select, drag, middle-click, token 401 checks). |
 | `extensions/cb-test/` | Test extension (MV3, no deps): content script marks every page `data-cb-ext="loaded"` and adds a "CloudBrowser Ext ON" badge. Drop other unpacked MV3 folders beside it. |
 | `test_extensions.py` | Extensions end-to-end test (marker + badge, survives reload, marker survives profile switches, token 401 checks). |
 | `test_screencast.py` | Live-stream end-to-end test (frame changes after a click within ~1 s, stream delivers frames while the page changes + bandwidth measurement, stream survives a profile switch, fallback when CDP fails, token checks). Runs in extensions mode, classic mode, and a simulated-CDP-failure mode. |
@@ -222,16 +227,18 @@ To stop: Ctrl+C in the terminal, or the **Stop** button in the UI.
 ```bash
 # terminal 1 — start the server with a test token (as above, e.g. test-token-123)
 # terminal 2 — run the tests (same token in the environment)
+CLOUD_BROWSER_TOKEN=test-token-123 ~/workspace/fbvenv/bin/python ~/workspace/cloud-browser/test_control_v6.py
 CLOUD_BROWSER_TOKEN=test-token-123 ~/workspace/fbvenv/bin/python ~/workspace/cloud-browser/test_profiles.py
 CLOUD_BROWSER_TOKEN=test-token-123 ~/workspace/fbvenv/bin/python ~/workspace/cloud-browser/test_v2.py
 CLOUD_BROWSER_TOKEN=test-token-123 ~/workspace/fbvenv/bin/python ~/workspace/cloud-browser/test_v1.py
 ```
 
-`test_profiles.py` is fast (~5s) and `test_v2.py` is fast (~12s).
-`test_v1.py` takes ~75s: it waits past 65s to prove the session does
-NOT auto-destroy. Results on 2026-10-31 after the profiles change:
-**profiles 36/36 passed, v2 37/37 passed, v1 19/19 passed — 92/92
-total, exit 0.** See TEST-REPORT.md.
+`test_control_v6.py` is fast (~9s), `test_profiles.py` is fast (~5s) and
+`test_v2.py` is fast (~12s). `test_v1.py` takes ~75s: it waits past 65s
+to prove the session does NOT auto-destroy. Results on 2026-10-31 after
+the v6 change: **control-v6 42/42 passed, profiles 36/36 passed, v2
+37/37 passed, v1 19/19 passed — 134/134 total, exit 0.** See
+TEST-REPORT.md.
 
 ## API (what the UI calls)
 
@@ -250,7 +257,7 @@ Every `/api/*` route needs the token: header `X-Cloud-Token`, or
 | `GET` | `/api/screencast-stats` | `{screencast_on, frames, bytes_total}` for the current session |
 | `GET` | `/api/status` | `{active, sid, url, title, elapsed}` |
 | `GET` | `/api/info` | Page title/URL/text, input value, element boxes, focused element, history length |
-| `POST` | `/api/click` `{"x","y","disp_w","disp_h"}` | Left-click in the remote browser (coords scaled to 1280×720) |
+| `POST` | `/api/click` `{"x","y","disp_w","disp_h","button"}` | Click in the remote browser (coords scaled to 1280×720); `button` is `left` (default), `middle` or `right` |
 | `POST` | `/api/rightclick` `{"x","y","disp_w","disp_h"}` | Right-click in the remote browser |
 | `POST` | `/api/dblclick` `{"x","y","disp_w","disp_h"}` | Double-click in the remote browser |
 | `POST` | `/api/hover` `{"x","y","disp_w","disp_h"}` | Move the mouse (hover) in the remote browser |
@@ -265,6 +272,36 @@ Every `/api/*` route needs the token: header `X-Cloud-Token`, or
 | `POST` | `/api/profile/select` `{"id": ...}` | Switch profile — ends the live session, saves its state, returns `{ok, active, switched, session_ended}` |
 | `POST` | `/api/profile/delete` `{"id": ...}` | Delete a profile + its saved state; deleting the active one falls back to `default` (default itself cannot be deleted) |
 | `POST` | `/api/eval` `{"js": ...}` | Run a JS expression in the live page (test/debug helper), returns `{result}` |
+| `GET` | `/api/cookies` `?domain=` | List the live context's cookies `[{name, value, domain, path, expires, httpOnly, secure, sameSite}]` (+ `count`); error when no session is live |
+| `POST` | `/api/cookies` `{"cookies": [...]}` or `{"cookie_string": ..., "domain": ...}` | Inject cookies into the live context with `context.add_cookies()` — HttpOnly included. List form: cookie objects (`name`, `value`, `url` or `domain`+`path`, optional `expires`/`httpOnly`/`secure`/`sameSite`). String form: one raw `"name=value; ..."` string + one domain for all |
+| `POST` | `/api/upload` (multipart) | Feed a file to the remote page. Fields: `file` (required), `mode` (`input` default | `chooser`), `selector` (default `input[type=file]`). Input mode sets the file on the input (works on hidden inputs); chooser mode arms a one-time filechooser handler for the next native dialog. 20 MB cap; files live in `uploads/` (ephemeral) |
+| `GET` | `/api/upload/status` | `{armed, fired, file, error, armed_for_s}` for the chooser-arm mode |
+| `POST` | `/api/select` `{"selector", "value" \| "label" \| "index"}` | Pick a dropdown option in the live page |
+| `POST` | `/api/drag` `{"x1","y1","x2","y2","disp_w","disp_h"}` | Mouse drag between two view points in the remote browser |
+
+## Cookie login
+
+Paste a cookie string into the UI's cookie box (or POST it to
+`/api/cookies`): `name=value; name=value …` + a domain, e.g.
+`.facebook.com`. The server calls Playwright `context.add_cookies()` on
+the live context, so HttpOnly cookies (`c_user`, `xs`, `fr`) are set
+properly — `document.cookie` cannot set those (verified live 2026-10-31:
+only `c_user`/`xs` stuck that way, `datr`/`sb`/`fr` did not). After
+injecting, reload the page — the site loads logged in. Injected cookies
+persist in the profile's saved state (classic mode), so the login
+survives a profile switch. The UI's List button shows cookie names +
+count only, never values.
+
+## File upload
+
+Pick a file in the UI (or POST multipart to `/api/upload`). Two modes:
+- **Upload to file input** — the file is set on the page's file input
+  (`set_input_files`, selector default `input[type=file]`). No dialog
+  opens; works on hidden inputs too. This is the Facebook DP upload
+  path: the photo input is in the DOM, so the file goes straight in.
+- **Arm file chooser** — arms a one-time handler, then click the page's
+  upload button in the live view; the native file dialog that opens gets
+  the file. `GET /api/upload/status` reports whether it fired.
 
 ## Honest limits
 
@@ -286,7 +323,6 @@ Every `/api/*` route needs the token: header `X-Cloud-Token`, or
   resets on restart/sleep like everything else.
 - Screenshot polling (~2 fps), not a video stream. Good enough for v2.
 - Remote viewport is fixed at 1280×720.
-- **Still NOT controllable:** file upload dialogs, drag-and-drop /
-  drag-select, the browser's own UI (tabs, extensions, DevTools),
-  multi-tab sessions, shared clipboard with the local machine, touch
-  gestures, audio, middle-click. See TEST-REPORT.md for the full list.
+- **Still NOT controllable:** the browser's own UI (tabs, extensions,
+  DevTools), multi-tab sessions, shared clipboard with the local machine,
+  touch gestures, audio. See TEST-REPORT.md for the full list.

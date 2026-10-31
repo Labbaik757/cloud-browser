@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Cloud Browser v3 — full control</title>
+<title>Cloud Browser v6 — full control</title>
 <style>
   body { font-family: system-ui, sans-serif; background:#111; color:#eee; margin:0; padding:16px; }
   h1 { font-size:20px; margin:0 0 4px; }
@@ -11,6 +11,10 @@
   .bar { display:flex; gap:8px; flex-wrap:wrap; margin-bottom:10px; }
   input[type=text], input[type=url] { flex:1; min-width:280px; padding:8px; font-size:14px;
     background:#222; color:#eee; border:1px solid #444; border-radius:6px; }
+  textarea { flex:1; min-width:280px; padding:8px; font-size:14px;
+    background:#222; color:#eee; border:1px solid #444; border-radius:6px; }
+  input[type=file] { padding:8px; font-size:14px; background:#222; color:#eee;
+    border:1px solid #444; border-radius:6px; }
   select { padding:8px; font-size:14px; background:#222; color:#eee;
     border:1px solid #444; border-radius:6px; max-width:280px; }
   label { align-self:center; font-size:14px; color:#aaa; }
@@ -29,8 +33,8 @@
 </style>
 </head>
 <body>
-<h1>Cloud Browser v3 — full control</h1>
-<p class="sub">Disposable Playwright Chromium in the cloud (this machine). Unlimited time — no limit at all, session ends only when you click Stop. Profiles keep separate logins (cookies + localStorage) — switch profiles to change accounts. No sign-up. Click the live view to focus it, then type directly into it, right-click, double-click, hover — everything goes to the remote browser.</p>
+<h1>Cloud Browser v6 — full control</h1>
+<p class="sub">Disposable Playwright Chromium in the cloud (this machine). Unlimited time — no limit at all, session ends only when you click Stop. Profiles keep separate logins (cookies + localStorage) — switch profiles to change accounts. Cookie login: paste a cookie string below to log the live session into an account. File upload works too — pick a file and send it to the remote page. No sign-up. Click the live view to focus it, then type directly into it, right-click, double-click, hover — everything goes to the remote browser.</p>
 
 <div class="bar">
   <input id="token" type="password" placeholder="Token (printed when the server starts / in token.txt)">
@@ -60,9 +64,23 @@
   <button id="type-btn">Type</button>
   <button id="enter-btn">Press Enter</button>
 </div>
+<div class="bar">
+  <textarea id="cookie-string" rows="2" placeholder="Cookies to inject: name=value; name=value … (from the accounts file — HttpOnly cookies included)"></textarea>
+  <input id="cookie-domain" type="text" value=".facebook.com" placeholder="domain">
+  <button id="cookie-inject">Inject cookies</button>
+  <button id="cookie-list" class="nav">List cookies</button>
+  <span id="cookie-state"></span>
+</div>
+<div class="bar">
+  <input id="upload-file" type="file">
+  <input id="upload-selector" type="text" value="input[type=file]" placeholder="file input selector">
+  <button id="upload-input-btn">Upload to file input</button>
+  <button id="upload-arm-btn" class="nav">Arm file chooser</button>
+  <span id="upload-state"></span>
+</div>
 <div id="meta">Status: <span id="status-line">idle — no session</span> &nbsp;|&nbsp; Session time: <span id="elapsed">--</span> (unlimited)</div>
 <img id="live" tabindex="0" alt="Live view — start a session to see the remote browser">
-<p class="hint">Full control: click the live view, then type on your keyboard — letters, Backspace, Delete, Tab, arrows, Escape, Ctrl+A/C/V/X all go to the remote browser. Right-click and double-click work on the view; hover works too. Go navigates the SAME session (no restart). Live video stream (~10 fps; polling pauses while this tab is hidden). Default page is the local test page (this VM has no internet path in Chromium, so live sites are unproven here). No time limit — session ends only on Stop.</p>
+<p class="hint">Full control: click the live view, then type on your keyboard — letters, Backspace, Delete, Tab, arrows, Escape, Ctrl+A/C/V/X all go to the remote browser. Right-click and double-click work on the view; hover works too. Go navigates the SAME session (no restart). Live video stream (~10 fps; polling pauses while this tab is hidden). Cookie login: paste a "name=value; …" string + domain and Inject — the live session logs into that account (HttpOnly cookies included). File upload: pick a file, then "Upload to file input" sets it on the page's file input, or "Arm file chooser" and then click the page's upload button in the live view — the dialog gets the file. Default page is the local test page (this VM has no internet path in Chromium, so live sites are unproven here). No time limit — session ends only on Stop.</p>
 
 <script>
 const $ = id => document.getElementById(id);
@@ -249,6 +267,65 @@ $('type-text').addEventListener('keydown', async e => {
   if (e.key === 'Enter' && sid) { await api('/api/type', {text: $('type-text').value}); $('type-text').value = ''; }
 });
 $('enter-btn').onclick = async () => { if (sid) await api('/api/key', {key: 'Enter'}); };
+
+// Cookies: paste a raw "name=value; …" string + domain, inject into
+// the live context (HttpOnly included). List shows names + count only —
+// values are never rendered on the page.
+$('cookie-inject').onclick = async () => {
+  if (!sid) { $('cookie-state').textContent = 'no session — start one first'; return; }
+  const s = $('cookie-string').value.trim();
+  const domain = $('cookie-domain').value.trim();
+  if (!s || !domain) { $('cookie-state').textContent = 'paste cookies + domain first'; return; }
+  const r = await api('/api/cookies', {cookie_string: s, domain});
+  $('cookie-state').textContent = r.error ? ('error: ' + r.error) : ('injected ' + r.set + ': ' + (r.names || []).join(', '));
+  if (!r.error) $('cookie-string').value = '';
+};
+$('cookie-list').onclick = async () => {
+  const r = await api('/api/cookies');
+  if (r.error) { $('cookie-state').textContent = 'error: ' + r.error; return; }
+  const names = (r.cookies || []).map(c => c.name + (c.httpOnly ? ' (HttpOnly)' : ''));
+  $('cookie-state').textContent = r.count + ' cookies: ' + names.join(', ');
+};
+
+// File upload: pick a file, then either set it on a file input right
+// away, or arm the one-time filechooser handler and click the page's
+// upload button in the live view — the dialog gets the file.
+async function uploadFile(mode) {
+  if (!sid) { $('upload-state').textContent = 'no session — start one first'; return; }
+  const f = $('upload-file').files[0];
+  if (!f) { $('upload-state').textContent = 'choose a file first'; return; }
+  const fd = new FormData();
+  fd.append('file', f);
+  fd.append('mode', mode);
+  fd.append('selector', $('upload-selector').value.trim() || 'input[type=file]');
+  const headers = {};
+  if (token) headers['X-Cloud-Token'] = token;
+  $('upload-state').textContent = mode === 'chooser' ? 'arming…' : 'uploading…';
+  try {
+    const res = await fetch('/api/upload', {method: 'POST', headers, body: fd});
+    if (res.status === 401) { $('upload-state').textContent = 'unauthorized — wrong or missing token'; return; }
+    const r = await res.json();
+    if (r.error) { $('upload-state').textContent = 'error: ' + r.error; return; }
+    if (mode === 'chooser') {
+      $('upload-state').textContent = 'armed — now click the page upload button in the live view';
+      pollUploadStatus();
+    } else {
+      $('upload-state').textContent = 'uploaded ' + (r.file || '') + ' to ' + (r.selector || '');
+    }
+  } catch (e) { $('upload-state').textContent = 'error: ' + e; }
+}
+async function pollUploadStatus() {
+  for (let i = 0; i < 60; i++) {
+    await new Promise(r => setTimeout(r, 1000));
+    const s = await api('/api/upload/status');
+    if (s.fired) { $('upload-state').textContent = 'file dialog got ' + (s.file || ''); return; }
+    if (s.error) { $('upload-state').textContent = 'error: ' + s.error; return; }
+    if (!s.armed) { $('upload-state').textContent = 'chooser not fired — arm again and click the page button'; return; }
+  }
+  $('upload-state').textContent = 'still waiting for the file dialog…';
+}
+$('upload-input-btn').onclick = () => uploadFile('input');
+$('upload-arm-btn').onclick = () => uploadFile('chooser');
 
 function viewXY(e) {
   const r = live.getBoundingClientRect();

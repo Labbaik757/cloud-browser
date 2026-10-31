@@ -16,6 +16,25 @@ v2 adds, over v1's screenshot + basic click/type/scroll:
 - Hover: mousemove over the live view is forwarded (throttled in the UI),
   so hover menus / tooltips work.
 
+v6 adds, over v5's profiles + extensions + screencast:
+- Cookie login: POST /api/cookies injects cookies into the live context
+  with Playwright context.add_cookies() — HttpOnly cookies (c_user, xs,
+  fr) included — either as a list of cookie objects or as one raw
+  "name=value; name=value" string + a domain. GET /api/cookies lists
+  the live context's cookies (behind the same token auth). The UI has a
+  paste-a-cookie-string + domain + Inject section.
+- File upload: POST /api/upload (multipart) feeds a file to the remote
+  page — mode "input" sets it on a file input via set_input_files
+  (selector, default input[type=file], works on hidden inputs too);
+  mode "chooser" arms a one-time filechooser handler that feeds the
+  file to the next native file dialog the page opens. GET
+  /api/upload/status reports armed/fired. The UI has a file picker +
+  both buttons.
+- Parity: /api/select (dropdown by value/label/index), /api/drag
+  (mouse drag between two view points), and /api/click takes a button
+  (left/middle/right). Still NOT controllable: the browser's own UI
+  (tabs, DevTools), multi-tab sessions, shared clipboard, touch, audio.
+
 The session runs UNLIMITED — no time limit at all — until the user clicks
 Stop. No sign-up, no payment, no phone-home. Profiles give separate
 isolated logins: each profile's cookies + localStorage persist in
@@ -109,6 +128,14 @@ PROFILES_DIR = os.path.join(BASE_DIR, "profiles")
 REGISTRY_PATH = os.path.join(BASE_DIR, "profiles.json")
 DEFAULT_PROFILE = "default"
 
+# UPLOADS: files posted to /api/upload are saved here (server-side, so
+# set_input_files / the filechooser handler can feed them to the remote
+# page). Ephemeral on Render, like profiles. 20 MB cap per file; files
+# older than 1 hour are deleted opportunistically on each upload.
+UPLOAD_DIR = os.path.join(BASE_DIR, "uploads")
+UPLOAD_MAX_BYTES = 20 * 1024 * 1024
+UPLOAD_TTL_SECONDS = 3600
+
 # EXTENSIONS: unpacked MV3 extensions to load into the remote browser.
 # Each subfolder of extensions/ containing a manifest.json is loaded at
 # browser launch via --load-extension. Extensions only run in a NORMAL
@@ -173,6 +200,16 @@ class BrowserWorker(threading.Thread):
         # combo presses (Ctrl+A etc., done as a single press()) are tracked
         # separately and not double-released.
         self._down_keys = set()
+        # FILE UPLOAD (chooser-arm mode): the path of the armed file and
+        # whether it has been handed to a file dialog yet, plus the last
+        # failure. The armed handler is registered once per arm via
+        # page.once("filechooser").
+        self._upload_armed = False
+        self._upload_path = None
+        self._upload_file = None
+        self._upload_fired = False
+        self._upload_error = None
+        self._upload_armed_at = 0.0
         # SCREENCAST (CDP live stream): the latest JPEG frame from
         # Page.screencastFrame, plus ack bookkeeping. The event handler
         # runs on Playwright's driver thread, NOT the worker thread — it
@@ -714,12 +751,14 @@ class BrowserWorker(threading.Thread):
             return shot
         return self.page.screenshot(type="jpeg", quality=65)
 
-    def click(self, x, y, disp_w, disp_h):
+    def click(self, x, y, disp_w, disp_h, button="left"):
         if self.page is None:
             raise RuntimeError("no active session")
+        if button not in ("left", "middle", "right"):
+            raise ValueError("button must be left, middle or right")
         rx, ry = self._scale(x, y, disp_w, disp_h)
-        self.page.mouse.click(rx, ry)
-        return {"clicked": [round(rx, 1), round(ry, 1)]}
+        self.page.mouse.click(rx, ry, button=button)
+        return {"clicked": [round(rx, 1), round(ry, 1)], "button": button}
 
     def right_click(self, x, y, disp_w, disp_h):
         if self.page is None:
@@ -797,6 +836,193 @@ class BrowserWorker(threading.Thread):
         self.page.mouse.wheel(0, dy)
         return {"scrolled": dy}
 
+    # -- cookies -------------------------------------------------------------
+    # POST /api/cookies injects cookies into the LIVE context with
+    # context.add_cookies() — the only correct way to set HttpOnly
+    # cookies (c_user, xs, fr): document.cookie cannot set them, and
+    # the 2026-10-31 live test proved datr/sb/fr do not stick that way.
+    # Two forms: a list of cookie objects (name, value, url or
+    # domain+path, optional expires/httpOnly/secure/sameSite), or one
+    # raw "name=value; name=value" string + a domain for all of them
+    # (the format of the accounts files). Injected cookies persist in
+    # the profile's storage_state when the session is stopped/switched,
+    # so a login made this way survives a profile switch (classic mode).
+    _COOKIE_ATTRS = {"expires", "max-age", "domain", "path",
+                     "secure", "httponly", "samesite"}
+
+    def get_cookies(self, domain=None):
+        if self.context is None:
+            raise RuntimeError("no active session")
+        cookies = self.context.cookies()
+        if domain:
+            domain = str(domain)
+            cookies = [c for c in cookies
+                       if domain in (c.get("domain") or "")]
+        return {"cookies": cookies, "count": len(cookies)}
+
+    def set_cookies(self, cookies):
+        if self.context is None:
+            raise RuntimeError("no active session")
+        if not isinstance(cookies, list) or not cookies:
+            raise ValueError("cookies must be a non-empty list")
+        normalized = []
+        for c in cookies:
+            if not isinstance(c, dict) or not c.get("name") \
+                    or c.get("value") is None:
+                raise ValueError("each cookie needs name and value")
+            item = {"name": str(c["name"]), "value": str(c["value"])}
+            if c.get("url"):
+                item["url"] = str(c["url"])
+            else:
+                domain = str(c.get("domain") or "")
+                if not domain:
+                    raise ValueError("each cookie needs url or domain")
+                item["domain"] = domain
+                item["path"] = str(c.get("path") or "/")
+            if c.get("expires") is not None:
+                item["expires"] = float(c["expires"])
+            if c.get("httpOnly") is not None:
+                item["httpOnly"] = bool(c["httpOnly"])
+            if c.get("secure") is not None:
+                item["secure"] = bool(c["secure"])
+            if c.get("sameSite") is not None:
+                ss = str(c["sameSite"])
+                if ss not in ("Strict", "Lax", "None"):
+                    raise ValueError("sameSite must be Strict, Lax or None")
+                item["sameSite"] = ss
+            normalized.append(item)
+        self.context.add_cookies(normalized)
+        return {"set": len(normalized),
+                "names": [c["name"] for c in normalized]}
+
+    def set_cookies_from_string(self, cookie_string, domain):
+        if self.context is None:
+            raise RuntimeError("no active session")
+        if not isinstance(cookie_string, str) or not cookie_string.strip():
+            raise ValueError("cookie_string required")
+        domain = (domain or "").strip().lstrip(".")
+        if not domain:
+            raise ValueError("domain required")
+        cookies = []
+        for part in cookie_string.split(";"):
+            part = part.strip()
+            if not part or "=" not in part:
+                continue
+            name, value = part.split("=", 1)
+            name = name.strip()
+            value = value.strip()
+            if len(value) >= 2 and value[0] == value[-1] == '"':
+                value = value[1:-1]
+            # Skip Set-Cookie attributes if someone pastes that form.
+            if not name or name.lower() in self._COOKIE_ATTRS:
+                continue
+            cookies.append({"name": name, "value": value,
+                            "domain": "." + domain, "path": "/"})
+        if not cookies:
+            raise ValueError("no cookies parsed from cookie_string")
+        self.context.add_cookies(cookies)
+        return {"set": len(cookies),
+                "names": [c["name"] for c in cookies],
+                "domain": "." + domain}
+
+    # -- file upload ---------------------------------------------------------
+    # POST /api/upload feeds a server-saved file to the remote page.
+    # Mode "input" (default): set_input_files on a file input
+    # (selector, default input[type=file]) — no dialog involved, and it
+    # works even when the input is hidden (verified 2026-10-31).
+    # Mode "chooser": arms a one-time filechooser handler; the next
+    # native file dialog the page opens gets the file (the Facebook
+    # "Add photo" flow). The handler runs on the driver thread, so it
+    # only records + enqueues the job — every Playwright call stays on
+    # the worker thread (same rule as the screencast handler).
+    def upload_to_input(self, path, selector):
+        if self.page is None:
+            raise RuntimeError("no active session")
+        sel = (selector or "input[type=file]").strip() or "input[type=file]"
+        self.page.locator(sel).first.set_input_files(path)
+        return {"ok": True, "selector": sel}
+
+    def _on_filechooser(self, chooser):
+        """One-time filechooser handler (driver thread): only record +
+        enqueue — never call Playwright APIs here."""
+        try:
+            self.q.put(lambda: self._apply_chooser_file(chooser))
+        except Exception:
+            pass
+
+    def _apply_chooser_file(self, chooser):
+        """Worker-thread job: hand the armed file to the dialog that
+        just opened. A stale handler (re-armed with another file since)
+        is ignored; a failure is recorded for /api/upload/status."""
+        path = self._upload_path
+        if not self._upload_armed or not path:
+            return {"fired": False, "ignored": True}
+        try:
+            chooser.set_files(path)
+        except Exception as e:
+            self._upload_armed = False
+            self._upload_error = str(e)
+            return {"fired": False, "error": str(e)}
+        self._upload_fired = True
+        self._upload_armed = False
+        self._upload_error = None
+        return {"fired": True, "file": self._upload_file}
+
+    def arm_filechooser(self, path, filename):
+        if self.page is None:
+            raise RuntimeError("no active session")
+        self._upload_path = path
+        self._upload_file = filename
+        self._upload_armed = True
+        self._upload_fired = False
+        self._upload_error = None
+        self._upload_armed_at = time.time()
+        try:
+            self.page.once("filechooser", self._on_filechooser)
+        except Exception as e:
+            self._upload_armed = False
+            raise RuntimeError("could not arm filechooser: %s" % e)
+        return {"armed": True, "file": filename}
+
+    def upload_status(self):
+        return {"armed": self._upload_armed,
+                "fired": self._upload_fired,
+                "file": self._upload_file,
+                "error": self._upload_error,
+                "armed_for_s": (round(time.time() - self._upload_armed_at, 1)
+                                if self._upload_armed_at else 0)}
+
+    # -- parity: select + drag ----------------------------------------------
+    def select_option(self, selector, value=None, label=None, index=None):
+        if self.page is None:
+            raise RuntimeError("no active session")
+        kwargs = {}
+        if value is not None:
+            kwargs["value"] = value
+        if label is not None:
+            kwargs["label"] = label
+        if index is not None:
+            kwargs["index"] = int(index)
+        if not kwargs:
+            raise ValueError("select needs value, label or index")
+        sel = (selector or "").strip()
+        if not sel:
+            raise ValueError("selector required")
+        result = self.page.locator(sel).first.select_option(**kwargs)
+        return {"selected": result}
+
+    def drag(self, x1, y1, x2, y2, disp_w, disp_h):
+        if self.page is None:
+            raise RuntimeError("no active session")
+        rx1, ry1 = self._scale(x1, y1, disp_w, disp_h)
+        rx2, ry2 = self._scale(x2, y2, disp_w, disp_h)
+        self.page.mouse.move(rx1, ry1)
+        self.page.mouse.down()
+        self.page.mouse.move(rx2, ry2, steps=10)
+        self.page.mouse.up()
+        return {"dragged": [[round(rx1, 1), round(ry1, 1)],
+                            [round(rx2, 1), round(ry2, 1)]]}
+
     def info(self):
         if self.page is None:
             raise RuntimeError("no active session")
@@ -835,6 +1061,38 @@ class BrowserWorker(threading.Thread):
 
 WORKER = BrowserWorker()
 WORKER.start()
+
+
+def _parse_multipart(raw, boundary):
+    """Minimal multipart/form-data parser (one file field + text fields).
+    Returns (fields: {name: str}, files: {name: (filename, bytes)}).
+    Stdlib-only: cgi is deprecated/removed, so parse by hand."""
+    fields, files = {}, {}
+    sep = b"--" + boundary
+    for chunk in raw.split(sep):
+        if not chunk or chunk in (b"--", b"--\r\n", b"\r\n"):
+            continue
+        if b"\r\n\r\n" not in chunk:
+            continue
+        head, body = chunk.split(b"\r\n\r\n", 1)
+        if body.endswith(b"\r\n"):
+            body = body[:-2]
+        headers = {}
+        for line in head.decode("utf-8", "replace").split("\r\n"):
+            if ":" in line:
+                k, v = line.split(":", 1)
+                headers[k.strip().lower()] = v.strip()
+        disp = headers.get("content-disposition", "")
+        m = re.search(r'name="([^"]*)"', disp)
+        if not m:
+            continue
+        name = m.group(1)
+        fm = re.search(r'filename="([^"]*)"', disp)
+        if fm is not None:
+            files[name] = (fm.group(1), body)
+        else:
+            fields[name] = body.decode("utf-8", "replace")
+    return fields, files
 
 
 # ---------------------------------------------------------------------------
@@ -878,6 +1136,77 @@ class Handler(BaseHTTPRequestHandler):
         if not n:
             return {}
         return json.loads(self.rfile.read(n) or b"{}")
+
+    def _handle_upload(self):
+        """POST /api/upload — multipart/form-data with one file field
+        ("file") plus optional text fields: selector, mode
+        ("input" | "chooser"). Auth already checked by do_POST.
+        Saves the file under uploads/ (sanitized basename, 20 MB cap),
+        then either sets it on a file input right away or arms the
+        one-time filechooser handler. Returns JSON; never echoes the
+        file bytes back."""
+        ctype = self.headers.get("Content-Type") or ""
+        if "multipart/form-data" not in ctype:
+            self._send_json({"error": "multipart/form-data required"}, code=400)
+            return
+        m = re.search(r"boundary=([^;]+)", ctype)
+        if not m:
+            self._send_json({"error": "missing multipart boundary"}, code=400)
+            return
+        boundary = m.group(1).strip().strip('"').encode()
+        try:
+            n = int(self.headers.get("Content-Length") or 0)
+        except ValueError:
+            n = 0
+        if n <= 0 or n > UPLOAD_MAX_BYTES + 65536:
+            self._send_json({"error": "bad Content-Length"}, code=400)
+            return
+        raw = self.rfile.read(n)
+        fields, files = _parse_multipart(raw, boundary)
+        if "file" not in files:
+            self._send_json({"error": "file field required"}, code=400)
+            return
+        filename, data = files["file"]
+        if len(data) > UPLOAD_MAX_BYTES:
+            self._send_json({"error": "file too large (max 20 MB)"}, code=400)
+            return
+        safe = re.sub(r"[^A-Za-z0-9_.\-]+", "_",
+                      os.path.basename(filename) or "upload")
+        if not safe or safe in (".", ".."):
+            safe = "upload"
+        os.makedirs(UPLOAD_DIR, exist_ok=True)
+        # Opportunistic cleanup of stale uploads (>1h old).
+        now = time.time()
+        try:
+            for old in os.listdir(UPLOAD_DIR):
+                p = os.path.join(UPLOAD_DIR, old)
+                try:
+                    if os.path.isfile(p) and \
+                            now - os.path.getmtime(p) > UPLOAD_TTL_SECONDS:
+                        os.remove(p)
+                except OSError:
+                    pass
+        except OSError:
+            pass
+        path = os.path.join(UPLOAD_DIR, "%d_%s" % (int(now), safe))
+        with open(path, "wb") as f:
+            f.write(data)
+        mode = (fields.get("mode") or "input").strip().lower()
+        try:
+            if mode == "chooser":
+                result = WORKER.call(
+                    lambda: WORKER.arm_filechooser(path, safe), timeout=15)
+                result["size"] = len(data)
+                self._send_json(result)
+            else:
+                selector = fields.get("selector") or "input[type=file]"
+                result = WORKER.call(
+                    lambda: WORKER.upload_to_input(path, selector), timeout=30)
+                result["file"] = safe
+                result["size"] = len(data)
+                self._send_json(result)
+        except Exception as e:  # noqa: BLE001
+            self._send_json({"error": str(e)}, code=500)
 
     def _serve_file(self, name):
         path = os.path.join(BASE_DIR, name)
@@ -928,6 +1257,15 @@ class Handler(BaseHTTPRequestHandler):
                     self._send_json({"error": str(e)}, code=410)
             elif u.path == "/api/profiles":
                 self._send_json(WORKER.call(WORKER.list_profiles))
+            elif u.path == "/api/cookies":
+                try:
+                    domain = (parse_qs(u.query).get("domain") or [None])[0]
+                    self._send_json(WORKER.call(
+                        lambda: WORKER.get_cookies(domain)))
+                except Exception as e:
+                    self._send_json({"error": str(e)}, code=410)
+            elif u.path == "/api/upload/status":
+                self._send_json(WORKER.call(WORKER.upload_status))
             else:
                 self.send_error(404, "not found")
         else:
@@ -941,6 +1279,10 @@ class Handler(BaseHTTPRequestHandler):
         # Auth BEFORE reading the body: unauthenticated requests are refused
         # without touching any session state.
         if not self._require_auth():
+            return
+        # /api/upload is multipart, not JSON — handle it separately.
+        if u.path == "/api/upload":
+            self._handle_upload()
             return
         try:
             body = self._read_json()
@@ -998,6 +1340,31 @@ class Handler(BaseHTTPRequestHandler):
             elif u.path == "/api/click":
                 self._send_json(WORKER.call(lambda: WORKER.click(
                     float(body["x"]), float(body["y"]),
+                    float(body.get("disp_w") or VIEWPORT["width"]),
+                    float(body.get("disp_h") or VIEWPORT["height"]),
+                    str(body.get("button") or "left")), timeout=15))
+            elif u.path == "/api/cookies":
+                if isinstance(body.get("cookies"), list):
+                    self._send_json(WORKER.call(
+                        lambda: WORKER.set_cookies(body["cookies"]), timeout=15))
+                elif isinstance(body.get("cookie_string"), str):
+                    self._send_json(WORKER.call(
+                        lambda: WORKER.set_cookies_from_string(
+                            body["cookie_string"],
+                            body.get("domain") or ""), timeout=15))
+                else:
+                    self._send_json(
+                        {"error": "cookies list or cookie_string + domain required"},
+                        code=400)
+            elif u.path == "/api/select":
+                self._send_json(WORKER.call(lambda: WORKER.select_option(
+                    str(body.get("selector") or ""),
+                    body.get("value"), body.get("label"),
+                    body.get("index")), timeout=15))
+            elif u.path == "/api/drag":
+                self._send_json(WORKER.call(lambda: WORKER.drag(
+                    float(body["x1"]), float(body["y1"]),
+                    float(body["x2"]), float(body["y2"]),
                     float(body.get("disp_w") or VIEWPORT["width"]),
                     float(body.get("disp_h") or VIEWPORT["height"])), timeout=15))
             elif u.path == "/api/rightclick":
@@ -1072,7 +1439,7 @@ if __name__ == "__main__":
             f.write(str(PORT))
     except OSError:
         pass
-    print("Cloud Browser v3 — http://%s:%d/  (test page: /test-page.html)" % (HOST, PORT), flush=True)
-    print("Full control, unlimited sessions until Stop, profiles keep separate logins, no sign-up.", flush=True)
+    print("Cloud Browser v6 — http://%s:%d/  (test page: /test-page.html)" % (HOST, PORT), flush=True)
+    print("Full control, unlimited sessions until Stop, profiles keep separate logins, cookies + file upload, no sign-up.", flush=True)
     print("Token auth ON: every /api/* call needs X-Cloud-Token.", flush=True)
     server.serve_forever()

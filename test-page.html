@@ -38,6 +38,45 @@
 <div id="dbl-box" ondblclick="document.getElementById('dbl-status').textContent = 'Double-clicked!';">Double-click this box</div>
 <div id="dbl-status" class="mini-status">Not double-clicked yet.</div>
 
+<h2>Control v4 test controls</h2>
+<p>File input (visible): <input id="upload-input" type="file"></p>
+<div id="upload-status" class="mini-status">No file picked yet.</div>
+<input id="upload-hidden" type="file" style="display:none">
+<div id="upload-hidden-status" class="mini-status">No hidden file picked yet.</div>
+<p><button id="upload-trigger" onclick="document.getElementById('upload-input').click();">Open file dialog (chooser test)</button></p>
+
+<p><label for="test-select">Pick one:</label>
+<select id="test-select">
+  <option value="a">Alpha</option>
+  <option value="b">Beta</option>
+  <option value="c">Gamma</option>
+</select></p>
+<div id="select-status" class="mini-status">Selected: a</div>
+
+<div id="drag-box" style="margin-top:20px; padding:20px; background:#ddffdd; border:1px solid #6c6; width:300px;">Drag across this box</div>
+<div id="drag-status" class="mini-status">No drag yet.</div>
+
+<div id="mid-box" style="margin-top:20px; padding:20px; background:#ffdddd; border:1px solid #c66; width:300px;">Middle-click this box</div>
+<div id="mid-status" class="mini-status">Not middle-clicked yet.</div>
+
+<script>
+document.getElementById('upload-input').addEventListener('change', e => {
+  document.getElementById('upload-status').textContent = 'picked: ' + (e.target.files[0] ? e.target.files[0].name : 'none'); });
+document.getElementById('upload-hidden').addEventListener('change', e => {
+  document.getElementById('upload-hidden-status').textContent = 'picked: ' + (e.target.files[0] ? e.target.files[0].name : 'none'); });
+document.getElementById('test-select').addEventListener('change', e => {
+  document.getElementById('select-status').textContent = 'Selected: ' + e.target.value; });
+(function () {
+  const box = document.getElementById('drag-box'), st = document.getElementById('drag-status');
+  let down = false, moves = 0;
+  box.addEventListener('mousedown', () => { down = true; moves = 0; st.textContent = 'down'; });
+  box.addEventListener('mousemove', () => { if (down) { moves++; st.textContent = 'down+move' + moves; } });
+  box.addEventListener('mouseup', () => { if (down) { st.textContent = 'dragged moves=' + moves; down = false; } });
+  document.getElementById('mid-box').addEventListener('auxclick', e => {
+    if (e.button === 1) document.getElementById('mid-status').textContent = 'middle-clicked!'; });
+})();
+</script>
+
 <div class="spacer"><p>Scroll area — keep scrolling down to reach the yellow box.</p></div>
 
 <div id="more">

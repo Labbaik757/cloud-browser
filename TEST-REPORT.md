@@ -1,4 +1,4 @@
-# TEST-REPORT.md — Cloud Browser v3 (full control + live video stream)
+# TEST-REPORT.md — Cloud Browser v6 (full control + cookie login + file upload)
 
 Date: 2026-10-30. Tester: automated scripts `test_v1.py` + `test_v2.py`
 (driving the HTTP API exactly as the UI does) + manual curl checks. All
@@ -477,3 +477,45 @@ v2 test server (PID 21291) stopped by PID kill after both suites passed;
 port 8765 verified down (connection refused). No session, browser or
 cookie data remains. `__pycache__` in the project folder is Python
 bytecode only. Mediora untouched.
+
+## CONTROL v6 — cookie login + file upload + parity, 2026-10-31
+
+Afnan: the cloud browser must be a 100% control browser for Muse's own
+use, drivable by hand like her live browser. Verified gap: the server had
+NO cookie-injection API at all, and a live document.cookie test with
+Kristen's fresh cookies set c_user/xs but datr/sb/fr did not stick.
+Built into `server.py` + `index.html`:
+- `POST /api/cookies` — list form (`context.add_cookies()`, per-cookie
+  url or domain+path, expires/httpOnly/secure/sameSite) or raw-string
+  form (`"name=value; ..."` + one domain, Set-Cookie attributes skipped).
+  `GET /api/cookies` lists the live context's cookies (optional
+  `?domain=` filter). UI: paste cookie string + domain + Inject, List
+  shows names + count only (never values).
+- `POST /api/upload` (multipart, hand-rolled parser — cgi is
+  deprecated) — `file` + `mode` (`input` | `chooser`) + `selector`.
+  Input mode: `set_input_files` on the file input (default
+  `input[type=file]`). Chooser mode: arms a one-time `page.once(
+  "filechooser")` handler that feeds the file to the next native dialog
+  (handler only records + enqueues, same rule as the screencast
+  handler). `GET /api/upload/status` reports armed/fired/error. Files
+  saved under `uploads/` (20 MB cap, >1h files cleaned on upload). UI:
+  file picker + selector + both buttons.
+- Parity: `POST /api/select` (value/label/index), `POST /api/drag`
+  (mouse drag between two view points), `POST /api/click` takes
+  `button` (left/middle/right). All routes token-authed (401 checks).
+
+**Measured first, not guessed:** a direct Playwright experiment proved
+`set_input_files` works on a `display:none` input AND the once-handler
++ JS click hands the file to the dialog — both before the server code
+was written. One real bug found by the test run: `GET /api/cookies`
+with no session crashed the HTTP connection (do_GET has no outer
+try/except, unlike do_POST) — wrapped in a 410 like `/api/info`.
+
+**Results — 2026-10-31, v6 suite `test_control_v6.py`: 42/42 passed,
+exit 0 (~9 s).** Token checks (7), no-session errors (5), raw-string
+cookies set + listed + visible in document.cookie, HttpOnly list cookie
+set + listed httpOnly=true + NOT in document.cookie (the HttpOnly
+proof), validation errors (4), upload to visible + hidden inputs,
+chooser arm + fired + file on the page, upload validation (2), select,
+drag (10 mousemoves), middle-click, stop. Regression the same day:
+**profiles 36/36, v2 37/37, v1 19/19 — 134/134 total, exit 0.**
