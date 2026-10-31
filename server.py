@@ -17,7 +17,10 @@ v2 adds, over v1's screenshot + basic click/type/scroll:
   so hover menus / tooltips work.
 
 The session runs UNLIMITED — no time limit at all — until the user clicks
-Stop. No persistence, no cookies saved, no sign-up, no payment, no phone-home.
+Stop. No sign-up, no payment, no phone-home. Profiles give separate
+isolated logins: each profile's cookies + localStorage persist in
+profiles/<id>.json (Playwright storage_state) and are reloaded when that
+profile becomes active; one profile is active at a time (see README).
 
 Stack: Python 3.12 stdlib http.server + Playwright (sync API, from fbvenv).
 Playwright is NOT thread-safe across threads, so ALL Playwright calls run in
@@ -50,6 +53,7 @@ import json
 import mimetypes
 import os
 import queue
+import re
 import sys
 import threading
 import time
@@ -74,6 +78,17 @@ HOST = os.environ.get("CLOUD_BROWSER_HOST", "0.0.0.0")
 VIEWPORT = {"width": 1280, "height": 720}
 # No time limit: sessions run unlimited until explicit Stop (Afnan correction).
 
+# PROFILES: separate isolated logins (cookies + localStorage). Each profile
+# is an id (slug of its name) + a display name. The registry (id -> name,
+# plus which profile is active) lives in profiles.json next to this file;
+# each profile's browser state lives in profiles/<id>.json as a Playwright
+# storage_state file. Only ONE context/page is ever alive (Render free has
+# 512 MB) — switching saves the old profile's state, closes its context,
+# and opens the new profile's context with its saved state, if any.
+PROFILES_DIR = os.path.join(BASE_DIR, "profiles")
+REGISTRY_PATH = os.path.join(BASE_DIR, "profiles.json")
+DEFAULT_PROFILE = "default"
+
 # TOKEN AUTH: shared secret, read ONLY from the environment. The server
 # refuses to start if it is unset (see __main__) — refusing is safer than
 # auto-generating one, because a generated token printed to a console can
@@ -96,6 +111,12 @@ class BrowserWorker(threading.Thread):
         self.sid = None
         self.started_at = None
         self.url = None
+        # PROFILES: id -> display name, plus which profile is active.
+        # The registry is loaded from profiles.json at startup (or starts
+        # with just "default"); storage_state files live in profiles/.
+        self.profiles = {DEFAULT_PROFILE: "Default"}
+        self.active_profile = DEFAULT_PROFILE
+        self._load_registry()
         # Keys currently held down via keyboard.down() (worker thread only),
         # so key_up() never releases a key that was never pressed down, and
         # combo presses (Ctrl+A etc., done as a single press()) are tracked
@@ -131,22 +152,166 @@ class BrowserWorker(threading.Thread):
                 pass  # job() already captures its own errors
 
     # -- session lifecycle (all run on the worker thread) --------------------
-    def _stop_locked(self):
-        for obj, name in ((self.page, "page"), (self.context, "context"),
-                          (self.browser, "browser"), (self.playwright, "playwright")):
+    # -- profiles ------------------------------------------------------------
+    # All profile methods run on the worker thread (they touch Playwright
+    # state and the registry). Only ONE context/page is ever alive.
+    def _load_registry(self):
+        try:
+            with open(REGISTRY_PATH) as f:
+                data = json.load(f)
+            profiles = {str(k): str(v) for k, v in
+                        (data.get("profiles") or {}).items() if k and v}
+            active = data.get("active") or DEFAULT_PROFILE
+            if DEFAULT_PROFILE not in profiles:
+                profiles = {DEFAULT_PROFILE: "Default", **profiles}
+            if active not in profiles:
+                active = DEFAULT_PROFILE
+            self.profiles = profiles
+            self.active_profile = active
+        except Exception:
+            pass  # missing/corrupt registry — start with just "default"
+
+    def _save_registry(self):
+        try:
+            with open(REGISTRY_PATH, "w") as f:
+                json.dump({"active": self.active_profile,
+                           "profiles": self.profiles}, f)
+        except Exception:
+            pass  # registry is a convenience; a failed save must not break use
+
+    @staticmethod
+    def _slug(name):
+        slug = re.sub(r"[^a-z0-9]+", "-", name.strip().lower()).strip("-")
+        return slug or "profile"
+
+    def list_profiles(self):
+        return {"profiles": [{"id": pid, "name": self.profiles[pid]}
+                             for pid in self.profiles],
+                "active": self.active_profile}
+
+    def create_profile(self, name):
+        if not isinstance(name, str) or not name.strip():
+            raise ValueError("name required")
+        name = name.strip()[:64]
+        base = self._slug(name)
+        pid, n = base, 2
+        while pid in self.profiles:
+            pid = "%s-%d" % (base, n)
+            n += 1
+        self.profiles[pid] = name
+        self._save_registry()
+        return {"id": pid, "name": name}
+
+    def select_profile(self, pid):
+        if pid not in self.profiles:
+            raise RuntimeError("unknown profile: %s" % pid)
+        if pid == self.active_profile:
+            return {"ok": True, "active": pid, "switched": False,
+                    "session_ended": False}
+        was_live = self.sid is not None
+        self._close_context_locked()  # saves the old profile's state first
+        self.active_profile = pid
+        self._save_registry()
+        return {"ok": True, "active": pid, "switched": True,
+                "session_ended": was_live}
+
+    def delete_profile(self, pid):
+        if pid not in self.profiles:
+            raise RuntimeError("unknown profile: %s" % pid)
+        if pid == DEFAULT_PROFILE:
+            raise RuntimeError("the default profile cannot be deleted")
+        was_active = pid == self.active_profile
+        was_live = was_active and self.sid is not None
+        if was_active:
+            # Discard the deleted profile's state: close WITHOUT saving,
+            # then drop its state file.
+            self._close_context_locked(save=False)
+            self.active_profile = DEFAULT_PROFILE
+        del self.profiles[pid]
+        try:
+            os.remove(os.path.join(PROFILES_DIR, pid + ".json"))
+        except OSError:
+            pass
+        self._save_registry()
+        return {"ok": True, "active": self.active_profile,
+                "session_ended": was_live}
+
+    def _state_path(self):
+        return os.path.join(PROFILES_DIR, self.active_profile + ".json")
+
+    def _save_state_locked(self):
+        """Persist the active profile's cookies + localStorage to its
+        profiles/<id>.json storage_state file. No context = nothing to
+        save. A failed save never breaks stop/switch."""
+        if self.context is None:
+            return
+        try:
+            os.makedirs(PROFILES_DIR, exist_ok=True)
+            self.context.storage_state(path=self._state_path())
+        except Exception:
+            pass
+
+    def _close_context_locked(self, save=True):
+        """Close page + context only (browser stays alive for a fast
+        restart). Saves the active profile's state first, unless the
+        profile is being deleted."""
+        if save:
+            self._save_state_locked()
+        for obj in (self.page, self.context):
             try:
                 if obj is not None:
-                    obj.close() if name != "playwright" else obj.stop()
+                    obj.close()
             except Exception:
                 pass
-        self.page = self.context = self.browser = self.playwright = None
+        self.page = self.context = None
         self.sid = None
         self.started_at = None
         self.url = None
         self._down_keys = set()
 
-    def start_session(self, url):
+    def _ensure_browser_locked(self):
         from playwright.sync_api import sync_playwright
+        if self.browser is not None:
+            return
+        self.playwright = sync_playwright().start()
+        self.browser = self.playwright.chromium.launch(
+            headless=True,
+            args=["--no-sandbox", "--disable-dev-shm-usage"],
+        )
+
+    def _new_profile_context(self):
+        """Fresh context for the ACTIVE profile, pre-loaded with its
+        saved storage_state when the file exists. A corrupt/empty state
+        file falls back to a clean context instead of failing the start."""
+        try:
+            if os.path.isfile(self._state_path()):
+                return self.browser.new_context(
+                    viewport=VIEWPORT, ignore_https_errors=True,
+                    storage_state=self._state_path())
+        except Exception:
+            pass
+        return self.browser.new_context(
+            viewport=VIEWPORT, ignore_https_errors=True)
+
+    def evaluate(self, js):
+        """Run a JS expression in the live page (test/debug helper,
+        behind the same token auth). Returns {"result": ...}."""
+        if self.page is None:
+            raise RuntimeError("no active session")
+        return {"result": self.page.evaluate(js)}
+
+    def _stop_locked(self):
+        self._close_context_locked()  # saves the active profile's state
+        for obj, name in ((self.browser, "browser"),
+                          (self.playwright, "playwright")):
+            try:
+                if obj is not None:
+                    obj.close() if name != "playwright" else obj.stop()
+            except Exception:
+                pass
+        self.browser = self.playwright = None
+
+    def start_session(self, url):
         # v2: if a session is ALREADY live, Start navigates THAT session to
         # the new URL (same sid, same browser) instead of destroying it.
         if self.page is not None and self.sid is not None:
@@ -158,15 +323,15 @@ class BrowserWorker(threading.Thread):
             self.url = url
             return {"sid": self.sid, "url": url, "title": self.page.title(),
                     "navigated": True}
-        self._stop_locked()
-        self.playwright = sync_playwright().start()
-        self.browser = self.playwright.chromium.launch(
-            headless=True,
-            args=["--no-sandbox", "--disable-dev-shm-usage"],
-        )
-        # Fresh context every session: no storage, no cookies carried over.
-        self.context = self.browser.new_context(
-            viewport=VIEWPORT, ignore_https_errors=True)
+        self._close_context_locked()  # no live session; clean slate
+        try:
+            self._ensure_browser_locked()
+            self.context = self._new_profile_context()
+        except Exception:
+            # Browser died while idle (or launch failed) — rebuild once.
+            self._stop_locked()
+            self._ensure_browser_locked()
+            self.context = self._new_profile_context()
         self.page = self.context.new_page()
         try:
             self.page.goto(url, timeout=15000, wait_until="domcontentloaded")
@@ -452,6 +617,8 @@ class Handler(BaseHTTPRequestHandler):
                     self._send_json(WORKER.call(WORKER.info, timeout=15))
                 except Exception as e:
                     self._send_json({"error": str(e)}, code=410)
+            elif u.path == "/api/profiles":
+                self._send_json(WORKER.call(WORKER.list_profiles))
             else:
                 self.send_error(404, "not found")
         else:
@@ -499,6 +666,26 @@ class Handler(BaseHTTPRequestHandler):
                 self._send_json(WORKER.call(WORKER.reload, timeout=30))
             elif u.path == "/api/stop":
                 self._send_json(WORKER.call(WORKER.stop))
+            elif u.path == "/api/profile/create":
+                name = body.get("name")
+                if not isinstance(name, str) or not name.strip():
+                    self._send_json({"error": "name required"}, code=400)
+                    return
+                self._send_json(WORKER.call(
+                    lambda: WORKER.create_profile(name)))
+            elif u.path == "/api/profile/select":
+                self._send_json(WORKER.call(
+                    lambda: WORKER.select_profile(str(body.get("id") or ""))))
+            elif u.path == "/api/profile/delete":
+                self._send_json(WORKER.call(
+                    lambda: WORKER.delete_profile(str(body.get("id") or ""))))
+            elif u.path == "/api/eval":
+                js = body.get("js")
+                if not isinstance(js, str) or not js.strip():
+                    self._send_json({"error": "js required"}, code=400)
+                    return
+                self._send_json(WORKER.call(
+                    lambda: WORKER.evaluate(js), timeout=15))
             elif u.path == "/api/click":
                 self._send_json(WORKER.call(lambda: WORKER.click(
                     float(body["x"]), float(body["y"]),
@@ -577,6 +764,6 @@ if __name__ == "__main__":
     except OSError:
         pass
     print("Cloud Browser v2 — http://%s:%d/  (test page: /test-page.html)" % (HOST, PORT), flush=True)
-    print("Full control, unlimited sessions until Stop, no persistence, no sign-up.", flush=True)
+    print("Full control, unlimited sessions until Stop, profiles keep separate logins, no sign-up.", flush=True)
     print("Token auth ON: every /api/* call needs X-Cloud-Token.", flush=True)
     server.serve_forever()

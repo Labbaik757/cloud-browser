@@ -12,11 +12,13 @@ Stop. (A 60-second timer was in the first draft and was removed on Afnan's
 correction — there is no countdown, no auto-destroy, no demo limit anywhere
 in this code.)
 
-No sign-up, no payment, no phone-home, no persistence:
-every Start launches a fresh Chromium context and Stop destroys it.
-One shared token locks the API — see **Token auth** below. Muse uses
-it by opening its public link directly in her own browser and driving
-the page with her native capabilities — no extra control code needed.
+No sign-up, no payment, no phone-home. Profiles keep separate logins:
+each profile's cookies + localStorage are saved when you switch away
+or Stop, and reloaded when that profile becomes active (see
+**Profiles** below). One shared token locks the API — see **Token auth**
+below. Muse uses it by opening its public link directly in her own
+browser and driving the page with her native capabilities — no extra
+control code needed.
 
 ## Token auth (required before any public link)
 
@@ -33,6 +35,35 @@ no session data leaked.
 CLOUD_BROWSER_TOKEN=<long-random-token> ~/workspace/fbvenv/bin/python server.py
 ```
 
+## Profiles — multi-profile system (separate isolated logins)
+
+One profile per account (e.g. a different Facebook login each). Each
+profile has an id (a slug of its name, e.g. `facebook-work`) and a
+display name. A `default` profile always exists and cannot be deleted.
+
+- **One active context at a time** (Render free has only 512 MB — never
+  two contexts alive). Switching profiles ends the current session
+  (status goes idle), saves the old profile's cookies + localStorage to
+  `profiles/<id>.json` (Playwright `storage_state`), closes its
+  context, and makes the new profile active. The next Start opens the
+  new profile's context with its saved state, if any — so a login made
+  in a profile is still there when you come back to it.
+- **UI:** a Profile dropdown at the top (active profile selected), with
+  New (asks for a name, then switches into the new profile) and Delete
+  (asks for confirmation; deleting the active profile falls back to
+  `default`). A new session in the new profile starts on the test page.
+- **API** (all behind the same token auth): `GET /api/profiles`,
+  `POST /api/profile/create {"name": ...}`,
+  `POST /api/profile/select {"id": ...}`,
+  `POST /api/profile/delete {"id": ...}`. All existing endpoints act on
+  the ACTIVE profile. State is also saved on Stop.
+- **Persistence limit (honest): on Render free the disk is ephemeral**,
+  so profiles reset when the service restarts or sleeps — a profile's
+  saved login does not survive a Render restart. On the laptop the
+  profiles persist in `profiles/` because the folder stays on disk.
+  State is saved on switch/Stop, not on a killed server (`Ctrl+C`
+  without Stop loses the current session's unsaved state).
+
 ## Files
 
 | File | What it is |
@@ -45,6 +76,8 @@ CLOUD_BROWSER_TOKEN=<long-random-token> ~/workspace/fbvenv/bin/python server.py
 | `test-page2.html` | Second local test page (Back/Forward + navigate-in-session proof). |
 | `test_v1.py` | v1 end-to-end test (UI, click, type-box, scroll, unlimited-time proof, token 401 checks). |
 | `test_v2.py` | v2 end-to-end test (direct keyboard, Back/Forward/Reload, navigate in session, right/double-click, hover, token 401 checks). |
+| `test_profiles.py` | Profiles end-to-end test (create/select/delete, localStorage isolation + persistence across switches, token 401 checks). |
+| `profiles.json` + `profiles/` | Runtime state, created on first use (not shipped): profile registry + each profile's saved cookies/localStorage (`profiles/<id>.json`). |
 | `TEST-REPORT.md` | Exact test commands and honest pass/fail results (v2: 33/33, v1 regression: 16/16, plus auth checks). |
 
 ## Run it
@@ -106,15 +139,16 @@ To stop: Ctrl+C in the terminal, or the **Stop** button in the UI.
 ```bash
 # terminal 1 — start the server with a test token (as above, e.g. test-token-123)
 # terminal 2 — run the tests (same token in the environment)
+CLOUD_BROWSER_TOKEN=test-token-123 ~/workspace/fbvenv/bin/python ~/workspace/cloud-browser/test_profiles.py
 CLOUD_BROWSER_TOKEN=test-token-123 ~/workspace/fbvenv/bin/python ~/workspace/cloud-browser/test_v2.py
 CLOUD_BROWSER_TOKEN=test-token-123 ~/workspace/fbvenv/bin/python ~/workspace/cloud-browser/test_v1.py
 ```
 
-`test_v2.py` is fast (~12s). `test_v1.py` takes ~75s: it waits past 65s
-to prove the session does NOT auto-destroy. Results on 2026-10-30 after
-the token-auth change:
-**v2 37/37 passed, v1 19/19 passed — 56/56 total, exit 0** (v2 33 controls
-+ 4 auth checks; v1 16 checks + 3 auth checks). See TEST-REPORT.md.
+`test_profiles.py` is fast (~5s) and `test_v2.py` is fast (~12s).
+`test_v1.py` takes ~75s: it waits past 65s to prove the session does
+NOT auto-destroy. Results on 2026-10-31 after the profiles change:
+**profiles 36/36 passed, v2 37/37 passed, v1 19/19 passed — 92/92
+total, exit 0.** See TEST-REPORT.md.
 
 ## API (what the UI calls)
 
@@ -142,6 +176,11 @@ Every `/api/*` route needs the token: header `X-Cloud-Token`, or
 | `POST` | `/api/keyup` `{"key","ctrl","meta","shift","alt"}` | Key up — releases a held-down key |
 | `POST` | `/api/scroll` `{"dy": 300}` | Scroll the remote page |
 | `POST` | `/api/stop` | Destroy browser + session immediately |
+| `GET` | `/api/profiles` | List profiles `[{id, name}]` + which is `active` |
+| `POST` | `/api/profile/create` `{"name": ...}` | Create a profile, returns `{id, name}` (id is a slug of the name; a duplicate name gets `-2`) |
+| `POST` | `/api/profile/select` `{"id": ...}` | Switch profile — ends the live session, saves its state, returns `{ok, active, switched, session_ended}` |
+| `POST` | `/api/profile/delete` `{"id": ...}` | Delete a profile + its saved state; deleting the active one falls back to `default` (default itself cannot be deleted) |
+| `POST` | `/api/eval` `{"js": ...}` | Run a JS expression in the live page (test/debug helper), returns `{result}` |
 
 ## Honest limits
 
@@ -152,6 +191,10 @@ Every `/api/*` route needs the token: header `X-Cloud-Token`, or
   needs a host with internet (Afnan's PC).
 - Single session at a time (v2 scope). Starting a new session destroys
   the old one; Go/Back/Forward/Reload keep the same session.
+- One ACTIVE profile/context at a time. Profiles are isolated (separate
+  cookies + localStorage each), but on Render free the disk is
+  ephemeral: profiles reset when the service restarts or sleeps. On the
+  laptop they persist in `profiles/`.
 - Screenshot polling (~2 fps), not a video stream. Good enough for v2.
 - Remote viewport is fixed at 1280×720.
 - **Still NOT controllable:** file upload dialogs, drag-and-drop /

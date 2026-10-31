@@ -59,6 +59,66 @@ Results:
   Nothing deployed live; no Cloudflare/Render account created; no
   tunnel run here (this VM cannot do it meaningfully).
 
+## PROFILES — multi-profile system (separate isolated logins), 2026-10-31
+
+Afnan asked: can this have a multi-profile system? Yes — built into
+`server.py` + `index.html`, no new dependencies:
+
+- **Profiles:** id (slug of the name, e.g. `facebook-work`) + display
+  name. `default` always exists, cannot be deleted. Registry in
+  `profiles.json`, each profile's cookies + localStorage in
+  `profiles/<id>.json` (Playwright `storage_state`).
+- **One active context at a time** (Render free: 512 MB). Switching
+  saves the old profile's state, closes its context, ends the session
+  (status idle); the next Start opens the new profile's context with
+  its saved state. The browser process itself stays alive across
+  switches (fast restart); Stop still destroys everything, as before.
+- **New endpoints** (same token auth as everything else):
+  `GET /api/profiles`, `POST /api/profile/create|select|delete`,
+  plus `POST /api/eval` (run a JS expression in the live page —
+  test/debug helper the profile test uses for localStorage markers).
+- **UI:** Profile dropdown + New (prompt for name, switches into it)
+  + Delete (confirm; active-profile delete falls back to `default`),
+  above the URL bar. Unlock box, URL bar and every v2 control
+  untouched. A new session in the new profile starts on the test page.
+- **Honest limit:** on Render free the disk is ephemeral — profiles
+  reset when the service restarts or sleeps. On the laptop they persist
+  in `profiles/`. State saves on switch/Stop, not on a killed server.
+  `profiles/`, `profiles.json` and `port.txt` are now in
+  `.dockerignore` (runtime state, never shipped in the image).
+
+Test commands:
+
+```bash
+~/workspace/fbvenv/bin/python -m py_compile server.py test_profiles.py
+CLOUD_BROWSER_TOKEN=test-token-123 setsid ~/workspace/fbvenv/bin/python server.py > /tmp/cloud-browser-server.log 2>&1 < /dev/null &
+CLOUD_BROWSER_TOKEN=test-token-123 ~/workspace/fbvenv/bin/python test_profiles.py; echo "TEST-PROFILES-EXIT:$?"
+CLOUD_BROWSER_TOKEN=test-token-123 ~/workspace/fbvenv/bin/python test_v2.py; echo "TEST-V2-EXIT:$?"
+CLOUD_BROWSER_TOKEN=test-token-123 ~/workspace/fbvenv/bin/python test_v1.py; echo "TEST-V1-EXIT:$?"
+```
+
+Results — 2026-10-31, server started clean (no `profiles/` on disk):
+
+- **Profiles suite: 36/36 passed, exit 0 (~5s).** Auth 401s on
+  `/api/profiles`; UI has selector + New/Delete; `default` exists and
+  is active first; create A (`test-alpha`) + B (`test-beta`); duplicate
+  name gets `test-alpha-2`; empty name 400; unknown select/delete
+  error; delete `default` errors. Isolation: marker `A` set in profile
+  A is invisible in B (`None`), marker `B` invisible in A. Persistence:
+  A → B → A returns marker `A`, B → A → B returns marker `B`.
+  Switching ends the session both times (status inactive). Deleting
+  the active profile (B) falls back to `default`; deleting A leaves
+  only `default`. On-disk check after the run: `profiles/` empty,
+  `profiles.json` holds only `default` (test profiles cleaned up).
+- **v2 regression: 37/37 passed, exit 0** — identical to the 2026-10-30
+  run (33 v2 controls + 4 auth checks). No regressions.
+- **v1 regression: 19/19 passed, exit 0** — identical, including
+  session ALIVE past 65s (elapsed=67, no auto-destroy) and Stop ending
+  the session. No regressions.
+- **Combined: 92/92 passed.** Cleanup: test server stopped by PID
+  kill, port 8765 verified free; `profiles/`, `profiles.json` and
+  `port.txt` removed so the folder ships clean. Mediora untouched.
+
 ## v2 — what changed (Afnan: "tumhain sirf screenshot dikhy ga — tum usay
 control kar sako, everything")
 

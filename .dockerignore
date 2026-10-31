@@ -3,6 +3,13 @@ __pycache__/
 .git/
 .gitignore
 test_v1.py
+test_v2.py
+test_profiles.py
 TEST-REPORT.md
 README.md
 DEPLOY.md
+# Runtime state — never shipped in the image or the repo:
+# profile registry + each profile's saved cookies/localStorage.
+profiles/
+profiles.json
+port.txt

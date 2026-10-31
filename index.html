@@ -11,6 +11,10 @@
   .bar { display:flex; gap:8px; flex-wrap:wrap; margin-bottom:10px; }
   input[type=text], input[type=url] { flex:1; min-width:280px; padding:8px; font-size:14px;
     background:#222; color:#eee; border:1px solid #444; border-radius:6px; }
+  select { padding:8px; font-size:14px; background:#222; color:#eee;
+    border:1px solid #444; border-radius:6px; max-width:280px; }
+  label { align-self:center; font-size:14px; color:#aaa; }
+  #profile-state { align-self:center; font-size:13px; color:#aaa; }
   button { padding:8px 14px; font-size:14px; border-radius:6px; border:1px solid #444;
     background:#2a7a2a; color:#fff; cursor:pointer; }
   button.nav { background:#2a4a7a; }
@@ -26,12 +30,20 @@
 </head>
 <body>
 <h1>Cloud Browser v2 — full control</h1>
-<p class="sub">Disposable Playwright Chromium in the cloud (this machine). Unlimited time — no limit at all, session ends only when you click Stop. No persistence, no sign-up. Click the live view to focus it, then type directly into it, right-click, double-click, hover — everything goes to the remote browser.</p>
+<p class="sub">Disposable Playwright Chromium in the cloud (this machine). Unlimited time — no limit at all, session ends only when you click Stop. Profiles keep separate logins (cookies + localStorage) — switch profiles to change accounts. No sign-up. Click the live view to focus it, then type directly into it, right-click, double-click, hover — everything goes to the remote browser.</p>
 
 <div class="bar">
   <input id="token" type="password" placeholder="Token (printed when the server starts / in token.txt)">
   <button id="unlock">Unlock</button>
   <span id="token-state">locked — enter the token to use the browser</span>
+</div>
+
+<div class="bar">
+  <label for="profile-select">Profile:</label>
+  <select id="profile-select"></select>
+  <button id="profile-new" class="nav">New</button>
+  <button id="profile-delete" class="stop">Delete</button>
+  <span id="profile-state"></span>
 </div>
 
 <div class="bar">
@@ -84,6 +96,61 @@ $('unlock').onclick = async () => {
   }
   $('token-state').textContent = 'unlocked';
   $('token').disabled = true; $('unlock').disabled = true;
+  refreshProfiles();
+};
+
+// Profiles: separate isolated logins (cookies + localStorage). Only one
+// context is ever alive server-side; switching ends the current session,
+// saves its state, and the next Start opens the new profile's context.
+async function refreshProfiles() {
+  const p = await api('/api/profiles');
+  if (p.error || !p.profiles) return;
+  const sel = $('profile-select');
+  sel.innerHTML = '';
+  p.profiles.forEach(pr => {
+    const o = document.createElement('option');
+    o.value = pr.id; o.textContent = pr.name;
+    if (pr.id === p.active) o.selected = true;
+    sel.appendChild(o);
+  });
+  $('profile-delete').disabled = (sel.value === 'default');
+}
+$('profile-select').onchange = async () => {
+  const id = $('profile-select').value;
+  const r = await api('/api/profile/select', {id});
+  if (r.error) { $('profile-state').textContent = 'error: ' + r.error; await refreshProfiles(); return; }
+  if (r.session_ended) endSession('profile switched — no session');
+  // A new session in the new profile starts on the test page, as always.
+  urlInput.value = location.origin + '/test-page.html';
+  $('profile-state').textContent = 'profile: ' + ($('profile-select').selectedOptions[0]?.textContent || id);
+  await refreshProfiles();
+};
+$('profile-new').onclick = async () => {
+  const name = prompt('New profile name (e.g. Facebook — Work):');
+  if (!name || !name.trim()) return;
+  const r = await api('/api/profile/create', {name: name.trim()});
+  if (r.error) { $('profile-state').textContent = 'error: ' + r.error; return; }
+  await refreshProfiles();
+  $('profile-select').value = r.id;
+  const s = await api('/api/profile/select', {id: r.id});
+  if (s.error) { $('profile-state').textContent = 'error: ' + s.error; await refreshProfiles(); return; }
+  if (s.session_ended) endSession('switched to new profile — no session');
+  urlInput.value = location.origin + '/test-page.html';
+  $('profile-state').textContent = 'profile: ' + r.name;
+  await refreshProfiles();
+};
+$('profile-delete').onclick = async () => {
+  const sel = $('profile-select');
+  const id = sel.value;
+  const name = sel.selectedOptions[0]?.textContent || id;
+  if (id === 'default') { $('profile-state').textContent = 'the default profile cannot be deleted'; return; }
+  if (!confirm('Delete profile "' + name + '"? Its saved logins will be removed.')) return;
+  const r = await api('/api/profile/delete', {id});
+  if (r.error) { $('profile-state').textContent = 'error: ' + r.error; await refreshProfiles(); return; }
+  if (r.session_ended) endSession('profile deleted — no session');
+  urlInput.value = location.origin + '/test-page.html';
+  $('profile-state').textContent = 'deleted ' + name;
+  await refreshProfiles();
 };
 
 async function refreshShot() {
