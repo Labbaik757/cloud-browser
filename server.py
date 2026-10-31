@@ -763,7 +763,7 @@ if __name__ == "__main__":
             f.write(str(PORT))
     except OSError:
         pass
-    print("Cloud Browser v2 — http://%s:%d/  (test page: /test-page.html)" % (HOST, PORT), flush=True)
+    print("Cloud Browser v3 — http://%s:%d/  (test page: /test-page.html)" % (HOST, PORT), flush=True)
     print("Full control, unlimited sessions until Stop, profiles keep separate logins, no sign-up.", flush=True)
     print("Token auth ON: every /api/* call needs X-Cloud-Token.", flush=True)
     server.serve_forever()
