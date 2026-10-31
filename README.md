@@ -64,6 +64,40 @@ display name. A `default` profile always exists and cannot be deleted.
   State is saved on switch/Stop, not on a killed server (`Ctrl+C`
   without Stop loses the current session's unsaved state).
 
+## Extensions — unpacked MV3 extensions load into the remote browser
+
+Drop an unpacked Manifest V3 extension folder into `extensions/` and
+restart the server (or redeploy on Render) — the server scans
+`extensions/` at browser launch for subfolders containing a
+`manifest.json` and loads them with `--load-extension`. The included
+test extension (`extensions/cb-test/`) marks every page with
+`data-cb-ext="loaded"` and adds a small "CloudBrowser Ext ON" badge,
+proving the extension runs. Extensions are browser-level, so they are
+active in every profile. Adding or removing an extension needs a
+browser relaunch: restart the server (or redeploy on Render); a live
+session keeps the extensions it launched with.
+
+- **How it works (honest):** Playwright's normal `chromium.launch()`
+  runs the headless-shell build and its `new_context()` pages are
+  incognito, so extensions never load there — verified 2026-10-31.
+  With extensions installed the server instead launches a persistent
+  context on the full Chromium build (`channel="chromium"`, new
+  headless), one per profile, each with its own user-data-dir under
+  `profiles/<id>/`. Profile logins persist natively in that dir.
+- **Limits:**
+  - Extension popup/options pages are NOT reachable from this UI —
+    there is no toolbar. Content scripts (and background service
+    workers) run; popup UIs do not.
+  - A Chrome Web Store `.crx` file must be unpacked first: a `.crx`
+    is a zip with a header — strip the header bytes, then unzip, and
+    drop the resulting folder into `extensions/`.
+  - A profile that already has a saved `profiles/<id>.json`
+    storage_state starts fresh once extensions are installed (its
+    state moves to the profile's user-data-dir). In practice no
+    profile had saved state when extensions landed.
+  - With NO extensions installed the launch is exactly as before —
+    same code path, same speed.
+
 ## Files
 
 | File | What it is |
@@ -77,7 +111,9 @@ display name. A `default` profile always exists and cannot be deleted.
 | `test_v1.py` | v1 end-to-end test (UI, click, type-box, scroll, unlimited-time proof, token 401 checks). |
 | `test_v2.py` | v2 end-to-end test (direct keyboard, Back/Forward/Reload, navigate in session, right/double-click, hover, token 401 checks). |
 | `test_profiles.py` | Profiles end-to-end test (create/select/delete, localStorage isolation + persistence across switches, token 401 checks). |
-| `profiles.json` + `profiles/` | Runtime state, created on first use (not shipped): profile registry + each profile's saved cookies/localStorage (`profiles/<id>.json`). |
+| `extensions/cb-test/` | Test extension (MV3, no deps): content script marks every page `data-cb-ext="loaded"` and adds a "CloudBrowser Ext ON" badge. Drop other unpacked MV3 folders beside it. |
+| `test_extensions.py` | Extensions end-to-end test (marker + badge, survives reload, marker survives profile switches, token 401 checks). |
+| `profiles.json` + `profiles/` | Runtime state, created on first use (not shipped): profile registry + each profile's saved cookies/localStorage (`profiles/<id>.json`; in extensions mode, the profile's own user-data-dir `profiles/<id>/`). |
 | `TEST-REPORT.md` | Exact test commands and honest pass/fail results (v2: 33/33, v1 regression: 16/16, plus auth checks). |
 
 ## Run it
@@ -195,6 +231,11 @@ Every `/api/*` route needs the token: header `X-Cloud-Token`, or
   cookies + localStorage each), but on Render free the disk is
   ephemeral: profiles reset when the service restarts or sleeps. On the
   laptop they persist in `profiles/`.
+- **Extensions:** need a browser relaunch to take effect (restart the
+  server / redeploy); popup/options pages are not reachable (no
+  toolbar); `.crx` files must be unpacked first. On Render free the
+  disk is ephemeral, so a profile's extension-mode user-data-dir
+  resets on restart/sleep like everything else.
 - Screenshot polling (~2 fps), not a video stream. Good enough for v2.
 - Remote viewport is fixed at 1280×720.
 - **Still NOT controllable:** file upload dialogs, drag-and-drop /

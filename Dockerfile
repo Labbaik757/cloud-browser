@@ -17,6 +17,10 @@ RUN pip install --no-cache-dir -r requirements.txt
 
 COPY server.py index.html test-page.html ./
 
+# Unpacked extensions to load at browser launch (extensions/<name>/ with
+# a manifest.json). Must be copied or the feature silently does nothing.
+COPY extensions/ ./extensions/
+
 ENV PYTHONUNBUFFERED=1
 # Render sets PORT at runtime; server.py reads it (fallback CLOUD_BROWSER_PORT).
 EXPOSE 10000

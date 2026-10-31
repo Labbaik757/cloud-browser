@@ -54,6 +54,7 @@ import mimetypes
 import os
 import queue
 import re
+import shutil
 import sys
 import threading
 import time
@@ -89,6 +90,34 @@ PROFILES_DIR = os.path.join(BASE_DIR, "profiles")
 REGISTRY_PATH = os.path.join(BASE_DIR, "profiles.json")
 DEFAULT_PROFILE = "default"
 
+# EXTENSIONS: unpacked MV3 extensions to load into the remote browser.
+# Each subfolder of extensions/ containing a manifest.json is loaded at
+# browser launch via --load-extension. Extensions only run in a NORMAL
+# (non-incognito) browser context: Playwright's chromium.launch() runs
+# the headless-shell build and its new_context() pages are incognito, so
+# extensions never load there — verified 2026-10-31 (marker stayed None
+# in every launch() variant, loaded in launch_persistent_context). The
+# working path is a persistent context on the FULL Chromium build
+# (channel="chromium", new headless) — see _ensure_browser_locked. With
+# no extensions installed the launch is exactly as before.
+EXTENSIONS_DIR = os.path.join(BASE_DIR, "extensions")
+
+
+def find_extensions():
+    """Absolute paths of unpacked extensions to load: each subfolder of
+    extensions/ holding a manifest.json. [] when the folder is missing
+    or empty. Sorted, so the launch order is stable."""
+    try:
+        names = sorted(os.listdir(EXTENSIONS_DIR))
+    except OSError:
+        return []
+    found = []
+    for name in names:
+        d = os.path.join(EXTENSIONS_DIR, name)
+        if os.path.isdir(d) and os.path.isfile(os.path.join(d, "manifest.json")):
+            found.append(d)
+    return found
+
 # TOKEN AUTH: shared secret, read ONLY from the environment. The server
 # refuses to start if it is unset (see __main__) — refusing is safer than
 # auto-generating one, because a generated token printed to a console can
@@ -106,6 +135,9 @@ class BrowserWorker(threading.Thread):
         self.q = queue.Queue()
         self.playwright = None
         self.browser = None
+        # EXTENSIONS mode only: the persistent context the session page
+        # lives in (None in the classic launch() mode).
+        self.persistent_context = None
         self.context = None
         self.page = None
         self.sid = None
@@ -232,6 +264,9 @@ class BrowserWorker(threading.Thread):
             os.remove(os.path.join(PROFILES_DIR, pid + ".json"))
         except OSError:
             pass
+        # EXTENSIONS mode stores a profile's state in its own
+        # user-data-dir (profiles/<id>/), not a .json file — remove it too.
+        shutil.rmtree(os.path.join(PROFILES_DIR, pid), ignore_errors=True)
         self._save_registry()
         return {"ok": True, "active": self.active_profile,
                 "session_ended": was_live}
@@ -242,8 +277,10 @@ class BrowserWorker(threading.Thread):
     def _save_state_locked(self):
         """Persist the active profile's cookies + localStorage to its
         profiles/<id>.json storage_state file. No context = nothing to
-        save. A failed save never breaks stop/switch."""
-        if self.context is None:
+        save. A failed save never breaks stop/switch. In EXTENSIONS mode
+        the state already lives in the profile's user-data-dir (Chrome
+        saves it there itself), so there is nothing to save here."""
+        if self.context is None or self.persistent_context is not None:
             return
         try:
             os.makedirs(PROFILES_DIR, exist_ok=True)
@@ -254,15 +291,24 @@ class BrowserWorker(threading.Thread):
     def _close_context_locked(self, save=True):
         """Close page + context only (browser stays alive for a fast
         restart). Saves the active profile's state first, unless the
-        profile is being deleted."""
+        profile is being deleted. In EXTENSIONS mode the context IS the
+        persistent context, so closing it also closes the browser — the
+        next start relaunches it for the (possibly new) active profile."""
         if save:
             self._save_state_locked()
-        for obj in (self.page, self.context):
-            try:
-                if obj is not None:
-                    obj.close()
-            except Exception:
-                pass
+        try:
+            if self.page is not None:
+                self.page.close()
+        except Exception:
+            pass
+        try:
+            if self.context is not None:
+                self.context.close()
+        except Exception:
+            pass
+        if self.persistent_context is not None:
+            self.persistent_context = None
+            self.browser = None
         self.page = self.context = None
         self.sid = None
         self.started_at = None
@@ -273,16 +319,47 @@ class BrowserWorker(threading.Thread):
         from playwright.sync_api import sync_playwright
         if self.browser is not None:
             return
-        self.playwright = sync_playwright().start()
-        self.browser = self.playwright.chromium.launch(
-            headless=True,
-            args=["--no-sandbox", "--disable-dev-shm-usage"],
-        )
+        if self.playwright is None:
+            self.playwright = sync_playwright().start()
+        ext_dirs = find_extensions()
+        if not ext_dirs:
+            # No extensions: launch exactly as before.
+            self.browser = self.playwright.chromium.launch(
+                headless=True,
+                args=["--no-sandbox", "--disable-dev-shm-usage"],
+            )
+            self.persistent_context = None
+            return
+        # Extensions installed: load them into a persistent context on
+        # the FULL Chromium build (channel="chromium", new headless).
+        # chromium.launch() uses the headless-shell build and its
+        # new_context() pages are incognito, so extensions never run
+        # there — verified 2026-10-31. Each profile gets its own
+        # user-data-dir under profiles/, so its logins persist there
+        # natively (the .json storage_state files are not used in this
+        # mode, and a profile that already has one starts fresh — see
+        # README "Extensions").
+        print("Extensions found: %s" % ", ".join(ext_dirs), flush=True)
+        ext_arg = ",".join(ext_dirs)
+        user_data_dir = os.path.join(PROFILES_DIR, self.active_profile)
+        os.makedirs(user_data_dir, exist_ok=True)
+        self.persistent_context = self.playwright.chromium.launch_persistent_context(
+            user_data_dir, headless=True, channel="chromium",
+            args=["--no-sandbox", "--disable-dev-shm-usage",
+                  "--disable-extensions-except=" + ext_arg,
+                  "--load-extension=" + ext_arg],
+            ignore_default_args=["--disable-extensions"],
+            viewport=VIEWPORT, ignore_https_errors=True)
+        self.browser = self.persistent_context.browser
 
     def _new_profile_context(self):
         """Fresh context for the ACTIVE profile, pre-loaded with its
         saved storage_state when the file exists. A corrupt/empty state
-        file falls back to a clean context instead of failing the start."""
+        file falls back to a clean context instead of failing the start.
+        In EXTENSIONS mode the session page lives in the persistent
+        context itself (extensions only run there)."""
+        if self.persistent_context is not None:
+            return self.persistent_context
         try:
             if os.path.isfile(self._state_path()):
                 return self.browser.new_context(

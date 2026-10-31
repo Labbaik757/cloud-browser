@@ -119,6 +119,53 @@ Results — 2026-10-31, server started clean (no `profiles/` on disk):
   kill, port 8765 verified free; `profiles/`, `profiles.json` and
   `port.txt` removed so the folder ships clean. Mediora untouched.
 
+## EXTENSIONS — unpacked MV3 extensions load into the remote browser, 2026-10-31
+
+Afnan asked: install an extension and test it. Built into `server.py`:
+`extensions/` is scanned at browser launch for subfolders with a
+`manifest.json` and loaded via `--load-extension` (plus
+`--disable-extensions-except`). Test extension `extensions/cb-test/`
+(MV3, no deps): content script sets `data-cb-ext="loaded"` on every
+page and adds a fixed "CloudBrowser Ext ON" badge.
+
+**How it was verified — headless does NOT load extensions the naive
+way (and the proof):** first probe, plain `chromium.launch(headless=True)`
++ `--load-extension`: marker stayed `None` on a real http page, with
+and without `--disable-extensions-except`. Root cause, read from
+Playwright's own driver bundle: its default Chromium switches include
+`--disable-extensions`. Even after `ignore_default_args=
+["--disable-extensions"]` (verified gone from the live process
+command line) the marker stayed `None` — and direct CLI runs of the
+same full Chromium with `--headless` and `--headless=new` DID load it
+(marker "loaded"). The difference: `chromium.launch()` uses the
+headless-shell build and its `new_context()` pages are incognito, and
+extensions do not run in incognito contexts. The working path,
+verified: `launch_persistent_context` on the FULL Chromium build
+(`channel="chromium"`, new headless) — marker "loaded" in the
+persistent context's own pages. Extra `browser.new_context()` pages
+from that browser stayed `None`, so the session page lives IN the
+persistent context and each profile gets its own user-data-dir
+(`profiles/<id>/`); switching profiles relaunches the browser for the
+new profile (session ends on switch, as before). With no extensions
+installed the launch is byte-for-byte the old path.
+
+**Results — 2026-10-31, extensions installed:**
+- **Extensions suite: 17/17 passed, exit 0 (~10s).** UI loads; start
+  session; marker `data-cb-ext="loaded"` present; badge exists reading
+  "CloudBrowser Ext ON"; marker survives a page reload; create profile
+  "Test Ext B", switch (session ends), marker + badge present in B;
+  switch back to default, marker present again; delete B, only
+  `default` remains. Test profiles cleaned up.
+- **v1 regression: 19/19 passed, exit 0** (incl. session ALIVE past
+  65s). **v2 regression: 37/37 passed, exit 0. Profiles regression:
+  36/36 passed, exit 0** — all with extensions installed.
+- **Classic-mode check (extensions/ moved aside): profiles 36/36
+  passed, exit 0; marker `None` as expected; server log shows no
+  "Extensions found" — the old launch path is intact.
+- **Combined: 109/109 passed with extensions installed** (17 + 19 +
+  37 + 36). Cleanup: test server stopped; `profiles/`,
+  `profiles.json`, `port.txt` removed so the folder ships clean.
+
 ## v2 — what changed (Afnan: "tumhain sirf screenshot dikhy ga — tum usay
 control kar sako, everything")
 
