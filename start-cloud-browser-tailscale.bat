@@ -115,12 +115,10 @@ start "Cloud Browser Server" cmd /k %PY% "%~dp0server.py"
 REM Wait for the server to write port.txt (it binds a free port itself).
 REM A fixed 5s was too short when port 8765 was blocked - the server needs
 REM a moment to try the next port. Wait up to 30s for the file.
-set "WAIT_N=0"
-:wait_port
-if exist "%~dp0port.txt" goto :port_ready
-timeout /t 1 /nobreak >nul
-set /a WAIT_N+=1
-if %WAIT_N% lss 30 goto :wait_port
+for /l %%i in (1,1,30) do (
+  if exist "%~dp0port.txt" goto :port_ready
+  timeout /t 1 /nobreak >nul
+)
 echo [ERROR] Server did not write port.txt in 30s. Check the server window.
 pause
 exit /b 1
@@ -129,7 +127,7 @@ exit /b 1
 REM --- 6. Start Tailscale Funnel in THIS window, URL appears below ---
 REM Read the port the server actually bound, from port.txt.
 set "ACTUAL_PORT=8765"
-if exist "%~dp0port.txt" set /p ACTUAL_PORT < "%~dp0port.txt"
+for /f "usebackq delims=" %%P in ("%~dp0port.txt") do set "ACTUAL_PORT=%%P"
 echo.
 echo Starting Tailscale Funnel on port !ACTUAL_PORT! - your public URL appears below.
 echo Keep this window AND the server window open while browsing.

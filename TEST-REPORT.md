@@ -621,3 +621,16 @@ wrote it, defaulting to 8765. The Tailscale Funnel then proxied to 8765
 sat healthy on 8766. FIX: both launchers now wait for port.txt to appear
 (up to 30s) and fail with a clear error if it never does. Manual fix for
 the live run: `tailscale funnel 8766` in the funnel window.
+
+## v7.3 — launcher port-wait fix, take 2 (2026-11-01 ~18:33 PKT)
+
+v7.2's fix did NOT work on the laptop: after a fresh GitHub clone to
+C:\cloud-browser, the funnel STILL went to 8765 while the server sat on
+8766, and "The syntax of the command is incorrect." appeared again. The
+v7.2 loop (goto + `set /a` counter) and/or the `set /p VAR < "file"` read
+(redirect inside an IF) is the suspect. v7.3 replaces BOTH with the
+standard robust batch idioms: a `for /l %%i in (1,1,30)` wait loop (goto
+out on port.txt found, else a clear error after 30s) and a
+`for /f "usebackq delims=" %%P in ("port.txt")` read. The live run is
+still fixed by hand in the meantime: `tailscale funnel 8766` in the
+funnel window.
