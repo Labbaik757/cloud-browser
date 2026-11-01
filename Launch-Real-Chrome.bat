@@ -26,6 +26,24 @@ exit /b 1
 set "CHROME=chrome"
 :found
 
+REM --- 1b. Proxy - hide the real IP, appear as US ---
+REM If proxy.txt exists in this folder, its single line is the proxy
+REM for Chrome, e.g. http://user:pass@us-proxy.example.com:8080
+REM Chrome then shows the proxy's US IP, never the real one. WebRTC
+REM is forced through the proxy too, so the real IP cannot leak.
+REM No proxy.txt = no proxy, Chrome uses the direct connection.
+REM NOTE: if Chrome is already running, close it first, then run
+REM this file again, so the proxy applies to the new Chrome.
+set "PROXY="
+set "PROXY_FLAGS="
+if not exist "%~dp0proxy.txt" goto :no_proxy
+for /f "usebackq delims=" %%P in ("%~dp0proxy.txt") do set "PROXY=%%P"
+if not defined PROXY goto :no_proxy
+set "PROXY_FLAGS=--proxy-server=%PROXY% --force-webrtc-ip-handling-policy=disable_non_proxied_udp"
+echo Proxy ON: Chrome will use the proxy from proxy.txt
+echo Your real IP stays hidden; sites see the proxy's IP only.
+:no_proxy
+
 REM --- 2. Is Chrome with debugging already answering on port 9222? ---
 where curl >nul 2>&1
 if errorlevel 1 goto :launch
@@ -34,7 +52,7 @@ if not errorlevel 1 goto :already
 :launch
 echo Starting real Chrome with remote debugging on port 9222 ...
 echo Profile folder: C:\cloud-browser\chrome-profile
-start "" "%CHROME%" --remote-debugging-port=9222 --user-data-dir=C:\cloud-browser\chrome-profile --no-first-run --start-maximized
+start "" "%CHROME%" --remote-debugging-port=9222 --user-data-dir=C:\cloud-browser\chrome-profile --no-first-run --start-maximized --lang=en-US %PROXY_FLAGS%
 timeout /t 5 /nobreak >nul
 where curl >nul 2>&1
 if errorlevel 1 goto :nocurl

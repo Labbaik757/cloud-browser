@@ -634,3 +634,20 @@ out on port.txt found, else a clear error after 30s) and a
 `for /f "usebackq delims=" %%P in ("port.txt")` read. The live run is
 still fixed by hand in the meantime: `tailscale funnel 8766` in the
 funnel window.
+
+## v7.4 — hide the real IP, everything US (2026-11-01 ~18:40 PKT)
+
+Afnan's order: the original IP must ALWAYS stay hidden, never show or be
+detected anywhere, and everything must be United States. Launch-Real-Chrome.bat
+now reads `proxy.txt` (one line, `http://user:pass@host:port`) and passes it
+to Chrome as `--proxy-server`, plus `--force-webrtc-ip-handling-policy=
+disable_non_proxied_udp` so the real IP cannot leak via WebRTC, and
+`--lang=en-US`. No proxy.txt = direct connection (unchanged). If Chrome is
+already running, close it first so the proxy applies. Windows timezone
+should be set to a US zone (Eastern Time) for a full US appearance.
+Verify in the cloud browser at https://ifconfig.me — the IP shown must be
+the US proxy's, never the real one. NOTE: a free/datacenter US proxy can be
+flagged by Facebook (datacenter IP); a US residential proxy is better for
+Facebook but costs money. The proxy still hides the real IP either way.
+`.gitignore` added (proxy.txt, token.txt, port.txt, ids.json, ids/,
+profiles/, uploads/) so secrets are never committed by accident.

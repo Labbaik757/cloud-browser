@@ -2,8 +2,14 @@
 
 Source: https://github.com/Labbaik757/cloud-browser — the Windows laptop
 setup is in `LAPTOP-SETUP.md` (clone the repo, or download it as a ZIP).
-Your IDs (`ids.json`, `ids/` folder) and token (`token.txt`) are NOT in the
-repo — they live only on your machine, so updating the code never wipes them.
+Your IDs (`ids.json`, `ids/` folder), token (`token.txt`) and proxy
+(`proxy.txt`) are NOT in the repo — they live only on your machine, so
+updating the code never wipes them. **Hide your real IP:** put your US
+proxy (one line, `http://user:pass@host:port`) in `proxy.txt` and Chrome
+routes everything through it (WebRTC forced through the proxy too), so
+websites see the proxy's US IP, never your real one. Chrome's language
+is forced to en-US; set the Windows timezone to a US zone for a full
+US appearance. Verify at https://ifconfig.me in the cloud browser.
 
 A cloud browser like Browser.lol / NetworkChuck Cloud Browser, built
 from scratch. A web UI starts a session in the REAL installed Google Chrome

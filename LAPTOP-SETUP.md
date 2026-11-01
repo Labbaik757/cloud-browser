@@ -36,6 +36,35 @@ The setup lives on GitHub: https://github.com/Labbaik757/cloud-browser
   `token.txt` live only on your laptop, so updating the code never wipes
   them. (A fresh clone has no IDs yet — copy your `ids.json` + `ids/`
   folder into it, or add IDs from the browser's "Add / update ID" form.)
+  Your proxy is also local-only — `proxy.txt` is never in the repo (see
+  "Hide your real IP" below).
+
+## Hide your real IP + appear as US (proxy)
+
+Your real IP must never show anywhere. Chrome routes all its traffic
+through a US proxy, so websites see the proxy's US IP, never yours.
+WebRTC is forced through the proxy too, so the real IP cannot leak.
+
+1. Create a file named `proxy.txt` in `C:\cloud-browser` (same folder as
+   the `.bat` files). One line only, your US proxy:
+   `http://user:pass@us-proxy.example.com:8080`
+   (Use your own US proxy — e.g. a Webshare US proxy. Save the file as
+   plain text, ANSI or UTF-8 without BOM. Do NOT put this file on GitHub
+   and do NOT send it to anyone — it holds your proxy password.)
+2. If Chrome is already running, CLOSE it first (the cloud-browser
+   profile window), then double-click `Launch-Real-Chrome.bat` again —
+   it prints "Proxy ON" when the proxy applies. Then run
+   `start-cloud-browser-tailscale.bat` as usual.
+3. US timezone: set the Windows timezone to a US zone (Settings →
+   Time & language → Date & time → Time zone → (UTC-05:00) Eastern
+   Time). Chrome's language is already forced to en-US.
+4. VERIFY (important): in the cloud browser, open https://ifconfig.me
+   and confirm the IP shown is a US IP and NOT your real one. If it
+   shows your real IP, the proxy did not apply — close Chrome and
+   re-run `Launch-Real-Chrome.bat`.
+   NOTE: a free/datacenter US proxy can be flagged by Facebook (it sees
+   a datacenter IP). A US residential proxy is better for Facebook but
+   costs money. The proxy still hides your real IP either way.
 
 ## What you need
 

@@ -1,0 +1,12 @@
+# Secrets + local state - NEVER commit these.
+# They live only on your own machine, never on GitHub.
+proxy.txt
+token.txt
+port.txt
+ids.json
+ids/
+profiles/
+profiles.json
+uploads/
+__pycache__/
+*.pyc
