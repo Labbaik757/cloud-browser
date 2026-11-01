@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Cloud Browser v6 — full control</title>
+<title>Cloud Browser v7.1 — real Chrome, full control</title>
 <style>
   body { font-family: system-ui, sans-serif; background:#111; color:#eee; margin:0; padding:16px; }
   h1 { font-size:20px; margin:0 0 4px; }
@@ -33,8 +33,8 @@
 </style>
 </head>
 <body>
-<h1>Cloud Browser v6 — full control</h1>
-<p class="sub">Disposable Playwright Chromium in the cloud (this machine). Unlimited time — no limit at all, session ends only when you click Stop. Profiles keep separate logins (cookies + localStorage) — switch profiles to change accounts. Cookie login: paste a cookie string below to log the live session into an account. File upload works too — pick a file and send it to the remote page. No sign-up. Click the live view to focus it, then type directly into it, right-click, double-click, hover — everything goes to the remote browser.</p>
+<h1>Cloud Browser v7.1 — real Chrome, full control</h1>
+<p class="sub">The REAL installed Google Chrome on this laptop (not a test Chromium) — real tabs, real extensions, real profile. Unlimited time — no limit at all, session ends only when you click Stop. Profiles keep separate logins (cookies + localStorage) — switch profiles to change accounts. Cookie login: paste a cookie string below to log the live session into an account. File upload works too — pick a file and send it to the remote page. No sign-up. Click the live view to focus it, then type directly into it, right-click, double-click, hover — everything goes to the remote browser. Facebook IDs have their own section below — pick an ID and log in with one click.</p>
 
 <div class="bar">
   <input id="token" type="password" placeholder="Token (printed when the server starts / in token.txt)">
@@ -78,9 +78,28 @@
   <button id="upload-arm-btn" class="nav">Arm file chooser</button>
   <span id="upload-state"></span>
 </div>
+<div class="bar" style="border:1px solid #444; border-radius:8px; padding:10px;">
+  <label for="id-select">Facebook ID:</label>
+  <select id="id-select" style="max-width:360px;"></select>
+  <button id="id-login">Login as ID</button>
+  <button id="id-reviews" class="nav">Reviews page</button>
+  <button id="id-profile" class="nav">Profile</button>
+  <button id="id-refresh" class="nav">Refresh list</button>
+  <span id="id-state"></span>
+</div>
+<div id="id-detail" class="hint" style="display:none; margin-bottom:10px;"></div>
+<div class="bar" style="border:1px solid #444; border-radius:8px; padding:10px;">
+  <label>Add / update ID:</label>
+  <input id="id-new-uid" type="text" placeholder="UID" style="flex:0 1 170px; min-width:150px;">
+  <input id="id-new-name" type="text" placeholder="Name" style="flex:0 1 170px; min-width:150px;">
+  <input id="id-new-password" type="text" placeholder="Password" style="flex:0 1 130px; min-width:120px;">
+  <input id="id-new-cookies" type="text" placeholder="Cookies name=value; …" style="flex:1 1 260px; min-width:200px;">
+  <button id="id-add">Add / Update</button>
+  <span id="id-add-state"></span>
+</div>
 <div id="meta">Status: <span id="status-line">idle — no session</span> &nbsp;|&nbsp; Session time: <span id="elapsed">--</span> (unlimited)</div>
 <img id="live" tabindex="0" alt="Live view — start a session to see the remote browser">
-<p class="hint">Full control: click the live view, then type on your keyboard — letters, Backspace, Delete, Tab, arrows, Escape, Ctrl+A/C/V/X all go to the remote browser. Right-click and double-click work on the view; hover works too. Go navigates the SAME session (no restart). Live video stream (~10 fps; polling pauses while this tab is hidden). Cookie login: paste a "name=value; …" string + domain and Inject — the live session logs into that account (HttpOnly cookies included). File upload: pick a file, then "Upload to file input" sets it on the page's file input, or "Arm file chooser" and then click the page's upload button in the live view — the dialog gets the file. Default page is the local test page (this VM has no internet path in Chromium, so live sites are unproven here). No time limit — session ends only on Stop.</p>
+<p class="hint">Full control: click the live view, then type on your keyboard — letters, Backspace, Delete, Tab, arrows, Escape, Ctrl+A/C/V/X all go to the remote browser. Right-click and double-click work on the view; hover works too. Go navigates the SAME session (no restart). Live video stream (~10 fps; polling pauses while this tab is hidden). Cookie login: paste a "name=value; …" string + domain and Inject — the live session logs into that account (HttpOnly cookies included). File upload: pick a file, then "Upload to file input" sets it on the page's file input, or "Arm file chooser" and then click the page's upload button in the live view — the dialog gets the file. This is the REAL installed Google Chrome on the laptop, not a test Chromium — real tabs, real profile, and the server never closes it. Facebook IDs: pick an ID above and "Login as ID" — its cookies are injected and Facebook opens logged in. No time limit — session ends only on Stop.</p>
 
 <script>
 const $ = id => document.getElementById(id);
@@ -115,6 +134,7 @@ $('unlock').onclick = async () => {
   $('token-state').textContent = 'unlocked';
   $('token').disabled = true; $('unlock').disabled = true;
   refreshProfiles();
+  loadIds(); // Facebook IDs section (v7) — one-click login per ID
 };
 
 // Profiles: separate isolated logins (cookies + localStorage). Only one
@@ -326,6 +346,83 @@ async function pollUploadStatus() {
 }
 $('upload-input-btn').onclick = () => uploadFile('input');
 $('upload-arm-btn').onclick = () => uploadFile('chooser');
+
+// Facebook IDs section (v7.1): loads ids.json (token-gated /api/ids) after
+// unlock. IDs are NOT fixed — names change and new IDs keep coming — so the
+// list is refreshed here (Refresh list) or rebuilt by rebuild_ids.py, and
+// single IDs are added below (Add / Update). "Login as ID" injects that
+// ID's cookies into the live session and opens facebook.com — one click, no
+// pasting. If the cookies are dead the login form appears and the password
+// in the detail line is typed by hand. Reviews page = Global Food Hub (the
+// feedback job's page).
+let IDS = [];
+async function loadIds() {
+  const prev = $('id-select').value;
+  const r = await api('/api/ids');
+  if (r.error || !r.ids) { $('id-state').textContent = 'IDs not loaded: ' + (r.error || 'empty'); return; }
+  IDS = r.ids;
+  const sel = $('id-select');
+  sel.innerHTML = '';
+  IDS.forEach(d => {
+    const o = document.createElement('option');
+    o.value = d.uid;
+    o.textContent = (d.num ? '#' + d.num + ' ' : '') + (d.new_name || d.name || d.uid) + ' (' + d.uid + ')' + (d.has_c_user ? '' : ' — no cookie');
+    sel.appendChild(o);
+  });
+  if (prev && IDS.some(d => d.uid === prev)) sel.value = prev;
+  $('id-state').textContent = IDS.length + ' IDs (' + IDS.filter(d => d.has_c_user).length + ' with login cookies)';
+  showIdDetail();
+}
+function selectedId() { return IDS.find(d => d.uid === $('id-select').value); }
+function showIdDetail() {
+  const d = selectedId();
+  const el = $('id-detail');
+  if (!d) { el.style.display = 'none'; return; }
+  el.style.display = 'block';
+  el.textContent = 'UID ' + d.uid + ' | now: ' + (d.name || '—') + ' | rename to: ' + (d.new_name || '—') + ' | password: ' + d.password + ' | cookies: ' + (d.has_c_user ? 'yes (' + d.source + ')' : 'NO — log in by hand with the password');
+}
+$('id-select').onchange = showIdDetail;
+$('id-login').onclick = async () => {
+  const d = selectedId();
+  if (!d) return;
+  if (!sid) { $('id-state').textContent = 'no session — start one first'; return; }
+  if (!d.has_c_user) { $('id-state').textContent = 'this ID has no login cookies — open facebook.com and log in with the password above'; return; }
+  const r = await api('/api/cookies', {cookie_string: d.cookies, domain: '.facebook.com'});
+  if (r.error) { $('id-state').textContent = 'cookie inject failed: ' + r.error; return; }
+  $('id-state').textContent = 'logged in as ' + (d.new_name || d.name || d.uid) + ' — opening Facebook…';
+  urlInput.value = 'https://www.facebook.com/';
+  await goOrStart();
+};
+$('id-reviews').onclick = async () => {
+  urlInput.value = 'https://www.facebook.com/globalfoodhubofficial/reviews/?id=787040499275067&sk=reviews';
+  await goOrStart();
+};
+$('id-profile').onclick = async () => {
+  urlInput.value = 'https://www.facebook.com/me';
+  await goOrStart();
+};
+$('id-refresh').onclick = async () => {
+  $('id-state').textContent = 'refreshing…';
+  await loadIds();
+};
+$('id-add').onclick = async () => {
+  const uid = $('id-new-uid').value.trim();
+  const name = $('id-new-name').value.trim();
+  const password = $('id-new-password').value.trim();
+  const cookies = $('id-new-cookies').value.trim();
+  if (!uid) { $('id-add-state').textContent = 'UID required'; return; }
+  const body = {uid};
+  if (name) body.name = name;
+  if (password) body.password = password;
+  if (cookies) body.cookies = cookies;
+  const r = await api('/api/ids', body);
+  if (r.error) { $('id-add-state').textContent = 'error: ' + r.error; return; }
+  $('id-add-state').textContent = (r.added ? 'added ' : 'updated ') + uid + ' — ' + r.count + ' IDs now';
+  $('id-new-uid').value = ''; $('id-new-name').value = ''; $('id-new-password').value = ''; $('id-new-cookies').value = '';
+  await loadIds();
+  $('id-select').value = uid;
+  showIdDetail();
+};
 
 function viewXY(e) {
   const r = live.getBoundingClientRect();

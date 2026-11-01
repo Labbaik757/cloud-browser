@@ -575,3 +575,49 @@ spawns. The Facebook rename job does not use extensions. If a session
 still OOMs in classic mode, the remaining options are a paid Render
 plan (more RAM) or moving the browser to the Oracle VM once that
 account exists — both need Afnan's call.
+
+## VERDICT — classic mode also OOMs; Render free cannot hold Facebook — 2026-11-01 ~00:03 PKT
+
+Dashboard check (read-only, 00:04–00:06 PKT): deploy d5cbe90 went
+live 23:59:38 PKT — BEFORE the re-proof restore, so the restore ran on
+the NEW classic-mode code. It still died: instance 57c2d "Ran out of
+memory (used over 512MB)" at 00:03 AM, ~2 min after the session went
+live (Kristen logged in, idle on facebook.com). No deploy-live events
+after midnight, so this was NOT a deploy restart. That is SEVEN OOM
+failures in ~35 minutes (23:29, 23:31, 23:34, 23:36, 23:40, 23:49,
+00:03). Service was "Failed service" on the dashboard at ~00:05 with
+no recovery event yet.
+
+FINAL VERDICT: neither the low-memory flags nor the classic
+headless-shell launch saves a Facebook session on Render free (512 MB).
+An idle Facebook tab alone exceeds the limit within ~2–5 minutes.
+Do NOT keep launching Facebook sessions on this service — each one
+OOMs and restarts it. The remaining options are a paid Render plan
+(more RAM) or moving the browser to the Oracle VM once that account
+exists (2 OCPU / 12 GB, muse-control already built) — both need
+Afnan's call. The Facebook rename/feedback work has already moved to
+machine Chrome (his order, ~23:55 PKT) and is not blocked by this.
+
+## v7 / v7.1 — laptop, REAL Chrome, dynamic IDs (2026-11-01)
+
+Afnan picked his own Windows laptop (free) as the browser host. The server
+now runs there instead of Render: v7 attaches over CDP to the REAL installed
+Google Chrome (Launch-Real-Chrome.bat, port 9222, dedicated profile) and
+never closes it; the page has a separate Facebook IDs section (one-click
+login per ID from ids.json, review-page links). v7.1: ids.json is GENERATED
+by rebuild_ids.py (never deletes a UID) and single IDs are added from the
+browser form — names change and IDs keep growing, so the list is not a
+fixed snapshot. Laptop package: Cloud_Browser_Laptop_v7.1_RealChrome.zip
+(111 files). Tests on the VM: Real Chrome CDP end-to-end ALL PASS,
+v6 control suite 42/42 PASS, POST /api/ids add/update + 401 ungated PASS.
+
+## v7.2 — launcher port-wait fix (2026-11-01 ~18:16 PKT)
+
+BUG (seen on the laptop): the server binds a free port itself (8765 was
+blocked by WinError 10013, so it took 8766 and wrote port.txt), but both
+launchers waited only a fixed 5s and then read port.txt before the server
+wrote it, defaulting to 8765. The Tailscale Funnel then proxied to 8765
+(nothing listening) and the public URL returned HTTP 502, while the server
+sat healthy on 8766. FIX: both launchers now wait for port.txt to appear
+(up to 30s) and fail with a clear error if it never does. Manual fix for
+the live run: `tailscale funnel 8766` in the funnel window.

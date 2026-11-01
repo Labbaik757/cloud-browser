@@ -35,6 +35,34 @@ v6 adds, over v5's profiles + extensions + screencast:
   (left/middle/right). Still NOT controllable: the browser's own UI
   (tabs, DevTools), multi-tab sessions, shared clipboard, touch, audio.
 
+v7 adds, over v6:
+- REAL CHROME: when CLOUD_BROWSER_REAL_CHROME=1 the server does NOT
+  launch Playwright's Chromium. It attaches over CDP to the real
+  installed Google Chrome, already running with
+  --remote-debugging-port=9222 (Launch-Real-Chrome.bat starts it with a
+  dedicated profile folder). That is the normal Chrome the user uses —
+  real tabs, real extensions, real profile — and the server NEVER closes
+  it: Stop only closes our tab and drops the CDP connection. If Chrome
+  is not reachable on the CDP URL, start fails with a clear message;
+  there is NO silent fallback to Chromium, because the laptop browser
+  must be the real Chrome. The VM/test path (REAL_CHROME unset) is
+  unchanged. Run on the laptop: Launch-Real-Chrome.bat, then
+  start-cloud-browser-tailscale.bat (sets REAL_CHROME=1).
+- IDs SECTION: the UI has a separate "Facebook IDs" section that loads
+  ids.json (token-gated /api/ids) — one-click login per ID (injects its
+  cookies, opens facebook.com), quick links to the review pages, and the
+  ID's password + rename target for manual work. The full ID automation
+  (drivers + data) ships in the ids/ folder of the laptop package.
+
+v7.1 adds, over v7:
+- IDs ARE NOT FIXED: names change and new IDs keep coming, so ids.json
+  is a GENERATED file, not a one-time snapshot. rebuild_ids.py (next to
+  server.py) regenerates it from the ids/ data files any time — it keeps
+  hand-added IDs and never deletes a UID. POST /api/ids adds or updates
+  one ID (the browser's "Add ID" form uses it). The server reads ids.json
+  fresh on every /api/ids request, so a rebuild or an add shows up at
+  once with no restart.
+
 The session runs UNLIMITED — no time limit at all — until the user clicks
 Stop. No sign-up, no payment, no phone-home. Profiles give separate
 isolated logins: each profile's cookies + localStorage persist in
@@ -104,6 +132,19 @@ FALLBACK_PORTS = [8765, 8766, 8767, 8080, 8000, 9000, 5000, 3000]
 HOST = os.environ.get("CLOUD_BROWSER_HOST", "0.0.0.0")
 VIEWPORT = {"width": 1280, "height": 720}
 # No time limit: sessions run unlimited until explicit Stop (Afnan correction).
+
+# REAL CHROME (v7, laptop default): when CLOUD_BROWSER_REAL_CHROME=1 the
+# server does NOT launch Playwright's Chromium. It attaches over CDP to the
+# real installed Google Chrome, already running with
+# --remote-debugging-port=9222 (Launch-Real-Chrome.bat starts it with a
+# dedicated profile folder). That is the normal Chrome the user uses —
+# real tabs, real extensions, real profile — and the server NEVER closes
+# it (close/stop only drop our tab + the CDP connection). If Chrome is not
+# reachable on the CDP URL, start fails with a clear message — there is
+# NO silent fallback to Chromium, because the laptop browser must be the
+# real Chrome. The VM/test path (REAL_CHROME unset) is unchanged.
+REAL_CHROME = os.environ.get("CLOUD_BROWSER_REAL_CHROME", "") == "1"
+CDP_URL = os.environ.get("CLOUD_BROWSER_CDP_URL", "http://127.0.0.1:9222")
 
 # Chromium launch flags shared by both launch paths. The last three keep
 # the compositor and timers unthrottled: a headless page counts as
@@ -207,6 +248,10 @@ class BrowserWorker(threading.Thread):
         # EXTENSIONS mode only: the persistent context the session page
         # lives in (None in the classic launch() mode).
         self.persistent_context = None
+        # REAL CHROME mode (v7): True while attached over CDP to the
+        # user's installed Google Chrome. The server must never close
+        # that browser — see _close_context_locked / _stop_locked.
+        self.real_chrome = False
         self.context = None
         self.page = None
         self.sid = None
@@ -423,7 +468,26 @@ class BrowserWorker(threading.Thread):
         restart). Saves the active profile's state first, unless the
         profile is being deleted. In EXTENSIONS mode the context IS the
         persistent context, so closing it also closes the browser — the
-        next start relaunches it for the (possibly new) active profile."""
+        next start relaunches it for the (possibly new) active profile.
+        In REAL CHROME mode (v7) the context is the user's own Chrome
+        profile: never close it and never close the browser — close only
+        our tab, and the next start reuses the same Chrome."""
+        if getattr(self, "real_chrome", False):
+            # Real Chrome belongs to the user. Close only our tab; the
+            # browser + its profile stay alive. (No state save: Chrome
+            # saves its own profile natively, like EXTENSIONS mode.)
+            self._stop_screencast_locked()
+            try:
+                if self.page is not None:
+                    self.page.close()
+            except Exception:
+                pass
+            self.page = self.context = None
+            self.sid = None
+            self.started_at = None
+            self.url = None
+            self._down_keys = set()
+            return
         if save:
             self._save_state_locked()
         # Stop the screencast BEFORE the page/context closes (the CDP
@@ -454,6 +518,36 @@ class BrowserWorker(threading.Thread):
             return
         if self.playwright is None:
             self.playwright = sync_playwright().start()
+        if REAL_CHROME:
+            # v7 REAL CHROME: attach over CDP to the real installed
+            # Google Chrome (Launch-Real-Chrome.bat starts it). The
+            # default context IS that Chrome's profile, so it is used
+            # as the persistent context — its logins persist natively
+            # and no storage_state file is written for it. Chrome can
+            # be slow to open its debug port on first launch, so retry
+            # the connect briefly instead of failing at once.
+            last_err = None
+            for _ in range(3):
+                try:
+                    self.browser = self.playwright.chromium.connect_over_cdp(CDP_URL)
+                    last_err = None
+                    break
+                except Exception as e:
+                    last_err = e
+                    time.sleep(1)
+            if last_err is not None:
+                raise RuntimeError(
+                    "Real Chrome not reachable on %s — run "
+                    "Launch-Real-Chrome.bat first, then retry (%s)"
+                    % (CDP_URL, last_err))
+            ctxs = self.browser.contexts
+            if ctxs:
+                self.persistent_context = ctxs[0]
+            else:
+                self.persistent_context = self.browser.new_context(
+                    viewport=VIEWPORT, ignore_https_errors=True)
+            self.real_chrome = True
+            return
         ext_dirs = find_extensions()
         if not ext_dirs:
             # No extensions: launch exactly as before.
@@ -462,6 +556,7 @@ class BrowserWorker(threading.Thread):
                 args=CHROMIUM_ARGS,
             )
             self.persistent_context = None
+            self.real_chrome = False
             return
         # Extensions installed: load them into a persistent context on
         # the FULL Chromium build (channel="chromium", new headless).
@@ -484,6 +579,7 @@ class BrowserWorker(threading.Thread):
             ignore_default_args=["--disable-extensions"],
             viewport=VIEWPORT, ignore_https_errors=True)
         self.browser = self.persistent_context.browser
+        self.real_chrome = False
 
     def _new_profile_context(self):
         """Fresh context for the ACTIVE profile, pre-loaded with its
@@ -618,6 +714,19 @@ class BrowserWorker(threading.Thread):
 
     def _stop_locked(self):
         self._close_context_locked()  # saves the active profile's state
+        if getattr(self, "real_chrome", False):
+            # Never close the user's real Chrome. Just drop the CDP
+            # connection by stopping Playwright; Chrome keeps running
+            # (it was started by the user, not by us).
+            self.browser = None
+            try:
+                if self.playwright is not None:
+                    self.playwright.stop()
+            except Exception:
+                pass
+            self.playwright = None
+            self.real_chrome = False
+            return
         for obj, name in ((self.browser, "browser"),
                           (self.playwright, "playwright")):
             try:
@@ -727,14 +836,18 @@ class BrowserWorker(threading.Thread):
         return {"stopped": was}
 
     def status(self):
+        # "browser" tells the UI which engine is driving the session:
+        # real-chrome (v7, the user's installed Google Chrome over CDP)
+        # or chromium (Playwright's bundled build — VM/test path).
+        kind = "real-chrome" if REAL_CHROME else "chromium"
         if self.sid is None:
-            return {"active": False}
+            return {"active": False, "browser": kind}
         try:
             title = self.page.title() if self.page else ""
         except Exception:
             title = ""
         return {"active": True, "sid": self.sid, "url": self.url,
-                "title": title,
+                "title": title, "browser": kind,
                 "elapsed": int(time.time() - self.started_at)}
 
     def screenshot(self):
@@ -1260,6 +1373,18 @@ class Handler(BaseHTTPRequestHandler):
                 # Must go through the worker queue: Playwright objects may only
                 # be touched on the worker thread (direct calls crash greenlets).
                 self._send_json(WORKER.call(WORKER.status))
+            elif u.path == "/api/ids":
+                # ID section data (ids.json next to server.py). Token-gated
+                # like every /api/* route: the file holds live session
+                # cookies + passwords, so it is never served ungated.
+                # No Playwright involved — read straight from disk.
+                try:
+                    with open(os.path.join(BASE_DIR, "ids.json"), "r", encoding="utf-8") as f:
+                        self._send_json(json.load(f))
+                except FileNotFoundError:
+                    self._send_json({"error": "ids.json not found — the ID section needs the laptop package's ids.json"})
+                except Exception as e:
+                    self._send_json({"error": str(e)}, code=500)
             elif u.path == "/api/screenshot":
                 try:
                     img = WORKER.call(WORKER.screenshot, timeout=15)
@@ -1379,6 +1504,49 @@ class Handler(BaseHTTPRequestHandler):
                     self._send_json(
                         {"error": "cookies list or cookie_string + domain required"},
                         code=400)
+            elif u.path == "/api/ids":
+                # v7.1: add or update ONE ID in ids.json. IDs are not
+                # fixed — new IDs keep coming and names keep changing —
+                # so the list is updated here (browser "Add ID" form) or
+                # by rebuild_ids.py, never by editing the file by hand
+                # while the server runs. Token-gated like every /api/*
+                # route. No Playwright involved.
+                # Body: {uid (required), password, cookies, name,
+                #        new_name, gender}. Returns {added, count}.
+                uid = str(body.get("uid") or "").strip()
+                if not uid:
+                    self._send_json({"error": "uid required"}, code=400)
+                    return
+                path = os.path.join(BASE_DIR, "ids.json")
+                try:
+                    with open(path, "r", encoding="utf-8") as f:
+                        data = json.load(f)
+                except Exception:
+                    data = {"ids": []}
+                entries = data.get("ids") or []
+                entry = None
+                for e in entries:
+                    if str(e.get("uid")) == uid:
+                        entry = e
+                        break
+                is_new = entry is None
+                if is_new:
+                    entry = {"uid": uid}
+                    entries.append(entry)
+                for key in ("password", "cookies", "name", "new_name", "gender"):
+                    if body.get(key) is not None:
+                        entry[key] = str(body.get(key))
+                entry.setdefault("num", None)
+                entry.setdefault("source", "manual")
+                entry["has_c_user"] = "c_user=" in (entry.get("cookies") or "")
+                entries.sort(key=lambda e: (e.get("num") is None, e.get("num") or 0, e.get("uid") or ""))
+                data["ids"] = entries
+                data["count"] = len(entries)
+                data["with_c_user"] = sum(1 for e in entries if e.get("has_c_user"))
+                with open(path, "w", encoding="utf-8") as f:
+                    json.dump(data, f, ensure_ascii=False, indent=1)
+                self._send_json({"added": is_new, "updated": not is_new,
+                                 "uid": uid, "count": len(entries)})
             elif u.path == "/api/select":
                 self._send_json(WORKER.call(lambda: WORKER.select_option(
                     str(body.get("selector") or ""),
@@ -1462,7 +1630,8 @@ if __name__ == "__main__":
             f.write(str(PORT))
     except OSError:
         pass
-    print("Cloud Browser v6 — http://%s:%d/  (test page: /test-page.html)" % (HOST, PORT), flush=True)
+    print("Cloud Browser v7.1 — http://%s:%d/  (test page: /test-page.html)" % (HOST, PORT), flush=True)
+    print("Browser: %s" % ("REAL Google Chrome via CDP %s" % CDP_URL if REAL_CHROME else "Playwright Chromium (bundled)"), flush=True)
     print("Full control, unlimited sessions until Stop, profiles keep separate logins, cookies + file upload, no sign-up.", flush=True)
     print("Token auth ON: every /api/* call needs X-Cloud-Token.", flush=True)
     server.serve_forever()

@@ -23,6 +23,9 @@ REM WinError 10013. The bat reads port.txt and tunnels that port.
 REM NOTE 2026-10-30: the free trycloudflare tunnel blocked Muse's
 REM browser twice with Your request was blocked, so if that happens
 REM use start-cloud-browser-tailscale.bat instead, same folder.
+REM v7: the server now drives the REAL installed Google Chrome
+REM (CLOUD_BROWSER_REAL_CHROME=1), not Playwright's Chromium.
+REM Launch-Real-Chrome.bat starts it first; this file checks it.
 setlocal EnableDelayedExpansion
 cd /d "%~dp0"
 set "PY=python"
@@ -49,9 +52,8 @@ echo Playwright not found - installing it now, first run only ...
 %PY% -m pip install --upgrade pip
 %PY% -m pip install playwright
 if errorlevel 1 goto :pip_fail
-echo Downloading Chromium for Playwright - first run only, about 150 MB ...
-%PY% -m playwright install chromium
-if errorlevel 1 goto :chromium_fail
+echo Playwright installed. Skipping the Chromium download - v7 uses your
+echo real installed Google Chrome, not the bundled Chromium.
 goto :pw_ok
 :pip_fail
 echo [ERROR] pip install playwright failed.
@@ -59,13 +61,24 @@ echo Check your internet, then double-click this file again.
 echo If pip says not recognized, reinstall Python with PATH ticked.
 pause
 exit /b 1
-:chromium_fail
-echo [ERROR] playwright install chromium failed.
-echo Check internet and free disk space, check antivirus is not
-echo blocking the download, then double-click this file again.
+:pw_ok
+
+REM --- 2b. Real Chrome: the server drives the REAL installed Google Chrome ---
+REM v7: no more Playwright Chromium. Launch Real Chrome first if needed.
+REM Launch-Real-Chrome.bat opens it with remote debugging on port 9222.
+set "CLOUD_BROWSER_REAL_CHROME=1"
+set "CB_NO_PAUSE=1"
+call "%~dp0Launch-Real-Chrome.bat"
+if errorlevel 1 goto :chrome_fail
+set "CB_NO_PAUSE="
+goto :chrome_ok
+:chrome_fail
+echo [ERROR] Real Chrome could not be started.
+echo Run Launch-Real-Chrome.bat by hand and follow what it says,
+echo then double-click this file again.
 pause
 exit /b 1
-:pw_ok
+:chrome_ok
 
 REM --- 3. cloudflared present? Same folder first, then PATH ---
 REM If the downloaded file still has its original name, rename it now.
@@ -110,7 +123,19 @@ if exist "%~dp0port.txt" del "%~dp0port.txt"
 echo.
 echo Starting Cloud Browser server - it picks a free port itself ...
 start "Cloud Browser Server" cmd /k %PY% "%~dp0server.py"
-timeout /t 5 /nobreak >nul
+REM Wait for the server to write port.txt (it binds a free port itself).
+REM A fixed 5s was too short when port 8765 was blocked - the server needs
+REM a moment to try the next port. Wait up to 30s for the file.
+set "WAIT_N=0"
+:wait_port
+if exist "%~dp0port.txt" goto :port_ready
+timeout /t 1 /nobreak >nul
+set /a WAIT_N+=1
+if %WAIT_N% lss 30 goto :wait_port
+echo [ERROR] Server did not write port.txt in 30s. Check the server window.
+pause
+exit /b 1
+:port_ready
 
 REM --- 6. Start the Quick Tunnel in THIS window, URL appears below ---
 REM Read the port the server actually bound, from port.txt.
